@@ -1,5 +1,5 @@
 """Deterministic reveal of the approved artwork. Requires Pillow, numpy, ffmpeg.
-Run: python3 animation/render.py
+Run: python3 custom/niro_boot/artwork/render.py
 No generated replacement art, scaling, warping, or device interaction.
 """
 from pathlib import Path
@@ -43,6 +43,13 @@ car = mask([(625,860),(621,706),(630,652),(619,646),(621,631),
             (963,574),(980,608),(1002,617),(1041,628),(1048,650),
             (1032,661),(1051,710),(1050,860)], 5)
 
+branding = np.maximum(logo, name)
+rgba = np.dstack((np.asarray(im), np.rint(branding*255).astype(np.uint8)))
+brand_image = Image.new("RGBA", (W,H+H%2))
+brand_image.paste(Image.fromarray(rgba),(0,0))
+brand_image.save(ROOT.parent / "branding.png")
+Image.new("RGB",(W,H+H%2)).save(ROOT.parent / "initial.png")
+
 def base_composite(t):
     a = np.full((H,W), float(smooth((t-.12)/1.3)), dtype=np.float32)
     def layer(m, v):
@@ -56,8 +63,8 @@ def base_composite(t):
     layer(segments, smooth((t-(.42+index*.105))/.22))
     layer(road, smooth((t-(1.10 + .70*(y-460)/(H-460)))/.75))
     layer(car, smooth((t-2.05)/1.1))
-    layer(logo, smooth((t-2.55)/1.0))
-    layer(name, smooth((t-3.05)/.8))
+    layer(logo, 1.0)
+    layer(name, 1.0)
     # Settle to the exact source, including all feather margins.
     a = a + (1-a)*smooth((t-3.85)/.45)
     if t >= 4.3:
@@ -91,6 +98,11 @@ sample_frames = {round(t*FPS): t for t in samples}
 for n in range(FPS*DURATION):
     frame_pixels = composite(n/FPS)
     proc.stdin.write(frame_pixels.tobytes())
+    if n <= 130 or 234 <= n <= 287:
+        runtime = Image.new("RGB",(W,H+H%2))
+        runtime.paste(Image.fromarray(frame_pixels),(0,0))
+        runtime.resize((836,471),Image.Resampling.LANCZOS).save(ROOT.parent / "frames" / f"{n:03}.jpg",quality=94)
+    assert np.array_equal(frame_pixels[branding == 1], np.asarray(im)[branding == 1]), "Branding moved or faded"
     if n in sample_frames:
         Image.fromarray(frame_pixels).save(REVIEW/f'frame-{sample_frames[n]:.1f}s.png')
 proc.stdin.close()
@@ -117,6 +129,6 @@ metadata = {'duration_seconds':DURATION,'fps':FPS,'frames':FPS*DURATION,
             'source_size':[W,H],'video_size':[W+(W%2),H+(H%2)],
             'graphic_complete_seconds':4.3, 'text_start_seconds':TEXT_START,
             'text_fade_seconds':TEXT_FADE, 'final_hold_from_seconds':TEXT_START+TEXT_FADE, 'status_text': STATUS, 'play_once': True,
-            'note':'MP4 adds one black bottom row for H.264 4:2:0 compatibility; approved artwork unchanged beneath status text.'}
+            'branding_static_from_seconds':0, 'note':'MP4 adds one black bottom row for H.264 4:2:0 compatibility; approved artwork unchanged beneath status text.'}
 (OUT/'render-info.json').write_text(json.dumps(metadata,indent=2)+'\n')
 print('Rendered 360 frames; delayed text verified; final hold generated; 12.0-second MP4 ready.',flush=True)

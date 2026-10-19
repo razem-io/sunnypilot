@@ -6,12 +6,14 @@ This is the C3/TICI line, not the newer C3X/C4 release line. AGNOS 12.8.
 [Official supported branches](https://community.sunnypilot.ai/t/recommended-branches/235/1).
 
 `launch_openpilot.sh` starts this splash in the background only on `comma tici`.
-The C3 launcher continues immediately. No driving logic, firmware, models,
-or safety settings are changed. The earlier firmware logo remains.
+The C3 launcher continues immediately. No driving logic, executable firmware, models,
+or safety settings are changed. The optional early-logo installer changes only
+boot artwork and Weston background encoding; see below.
 
 ## Sequence
 
-- Graphic resolves by 4.3 seconds.
+- KIA and NIRO EV are visible from the initial boot image and remain stationary.
+- Frame, lights, road and car resolve around them by 4.3 seconds.
 - The graphic stays still for 3.5 seconds.
 - `Systeme werden hochgefahren` fades in between 7.8 and 9.6 seconds.
 - The final graphic holds until sunnypilot's native UI heartbeat is ready.
@@ -22,7 +24,11 @@ startup is not delayed to finish the animation. Touch dismisses the splash.
 
 The native UI's 2160×1080 surface and 270° Wayland buffer transform are used.
 Playback uses lightweight 836×471 frames with wall-clock selection, then the
-full-resolution final PNG. The artwork's aspect ratio is preserved.
+full-resolution final PNG. The artwork's aspect ratio is preserved. A full-resolution `branding.png` layer
+is drawn at the same coordinates on every frame, including the final hold, so
+JPEG compression cannot make the lettering flicker. `initial.png` is black.
+Native offscreen screenshots verify identical bright lettering pixels across
+initial, completed, text-fade and hold states.
 
 The `python3` shim forwards all normal invocations to AGNOS's existing venv.
 Only `./spinner.py` in the C3 UI directory is handled by the proxy so the
@@ -62,8 +68,44 @@ launcher automatically.
 
 Returning to upstream `staging-tici` with the original `continue.sh` removes
 this startup hook. Restoring the saved pre-migration wrapper restores the
-previous external installation. No firmware flashing is involved.
+previous external installation. The separate early-logo installation persists across branch switches; restore
+it separately using the command below.
 
 Physical C3 testing confirmed the landscape orientation and full delayed-text
 sequence. Boot logs confirmed one playback and successful handoff to the native
 sunnypilot UI. Hardware testing of vehicle control is outside this cosmetic change.
+
+## Matching early boot artwork (explicit, one-time)
+
+`early-logo.py` is restricted to the validated original C3, SOM 8, AGNOS 12.8.
+It never runs automatically. It verifies the stock splash partition checksum,
+saves the entire original partition and two system files under
+`/data/local/niro-boot/early-logo-backup`, and replaces only the BMP pixel payload.
+Bootloader code, BMP headers, partition metadata and other partitions remain intact.
+A full read-back verifies the write. On an ordinary write failure it restores
+previous contents; the persistent backup also supports manual recovery.
+
+The exact native 2160×1080 initial screenshot is rotated 90° counter-clockwise
+into `early-logo-portrait.png` (1080×2160). This is the inverse of the player's
+270° buffer transform, as specified by the
+[Wayland protocol](https://wayland.freedesktop.org/docs/html/apa.html#protocol-spec-wl_surface-request-set_buffer_transform).
+The same lossless image becomes Weston's background. Its startup conversion is
+changed to PNG to avoid JPEG changes at the handoff. The system filesystem is
+remounted writable only during installation, then returned to read-only.
+
+On the device, with stable power:
+
+```sh
+sudo /usr/local/venv/bin/python3 custom/niro_boot/early-logo.py --install
+# Restore original early graphics and Weston configuration:
+sudo /usr/local/venv/bin/python3 custom/niro_boot/early-logo.py --restore
+```
+
+Neither command reboots or restarts Weston. Changes appear on the next normal
+boot. AGNOS updates may replace these system assets; this installer deliberately
+refuses unknown OS versions or modified partitions. The physical transition of
+this revised early-logo sequence still needs visual confirmation after reboot.
+
+To regenerate the early asset after changing the artwork, rebuild and run the
+native `--test` on AGNOS, retrieve `test/initial-screen.png`, then use Pillow's
+`transpose(Image.Transpose.ROTATE_90)` and save it as `early-logo-portrait.png`.

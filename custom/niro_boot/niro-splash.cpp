@@ -34,9 +34,10 @@ static int readyUi() {
 }
 class Splash:public QWidget {
 public:
-  QTimer watch, animation; QElapsedTimer elapsed; QImage current;
+  QTimer watch, animation; QElapsedTimer elapsed; QImage current, branding;
   bool test=false, shown=false, finished=false, graphicLogged=false, textLogged=false; int lastFrame=-1;
   explicit Splash(bool t):test(t) {
+    branding=QImage(root+"/branding.png");
     setWindowTitle("Kia Niro EV Startup");
     setWindowFlags(Qt::Window|Qt::FramelessWindowHint|Qt::WindowDoesNotAcceptFocus);
     setAttribute(Qt::WA_ShowWithoutActivating);setCursor(Qt::BlankCursor);setFixedSize(2160,1080);
@@ -67,30 +68,31 @@ public:
     int index=int(seconds*30);
     if(index>=130 && index<234)index=130;
     if(index==lastFrame)return;
-    current=QImage(root+"/frames/"+QString::number(index).rightJustified(3,'0')+".jpg");
-    if(current.isNull()){log("FAIL_OPEN: animation frame unavailable");QApplication::exit(1);return;}
+    current=QImage(index==0 ? root+"/initial.png" : root+"/frames/"+QString::number(index).rightJustified(3,'0')+".jpg");
+    if(current.isNull() || branding.isNull()){log("FAIL_OPEN: animation frame unavailable");QApplication::exit(1);return;}
     lastFrame=index;
     if(!shown){shown=true;if(test)show();else showLandscape();log("REVEAL_STARTED");}
     update();
-    if(test && index==130)current.save(root+"/test/graphic-complete.png");
-    if(test && index>=234 && index<=237)current.save(root+"/test/text-start.png");
-    if(test && index>=260 && index<=264)current.save(root+"/test/text-midpoint.png");
+    if(test && index==0)grab().save(root+"/test/initial-screen.png");
+    if(test && index==130)grab().save(root+"/test/graphic-complete.png");
+    if(test && index>=234 && index<=237)grab().save(root+"/test/text-start.png");
+    if(test && index>=260 && index<=264)grab().save(root+"/test/text-midpoint.png");
   }
   void hold(){
     animation.stop();current=QImage(root+"/final-hold.png");
-    if(current.isNull()){log("FAIL_OPEN: hold asset unavailable");QApplication::exit(1);return;}
+    if(current.isNull() || branding.isNull()){log("FAIL_OPEN: hold asset unavailable");QApplication::exit(1);return;}
     finished=true;
     if(!test && readyUi()){log("HANDOFF: UI ready before hold");QApplication::quit();return;}
     if(!shown){shown=true;if(test)show();else showLandscape();}
     update();log("STATIC_HOLD: no looping; elapsed_ms="+QString::number(elapsed.isValid()?elapsed.elapsed():0));
-    if(test){current.save(root+"/test/hold.png");QTimer::singleShot(2500,[]{log("TEST_HOLD_COMPLETE");QApplication::quit();});}
+    if(test){grab().save(root+"/test/hold.png");QTimer::singleShot(2500,[]{log("TEST_HOLD_COMPLETE");QApplication::quit();});}
   }
   void start(bool replayed){
     if(replayed){log("ALREADY_PLAYED_THIS_BOOT: holding final only");hold();return;}
     elapsed.start();tick();animation.start(33);
   }
 protected:
-  void paintEvent(QPaintEvent*)override {QPainter p(this);p.fillRect(rect(),Qt::black);if(!current.isNull()){QSize size=current.size();size.scale(this->size(),Qt::KeepAspectRatio);QRect dst(QPoint((width()-size.width())/2,(height()-size.height())/2),size);p.setRenderHint(QPainter::SmoothPixmapTransform);p.drawImage(dst,current);}}
+  void paintEvent(QPaintEvent*)override {QPainter p(this);p.fillRect(rect(),Qt::black);if(!current.isNull()){QSize size=current.size();size.scale(this->size(),Qt::KeepAspectRatio);QRect dst(QPoint((width()-size.width())/2,(height()-size.height())/2),size);p.setRenderHint(QPainter::SmoothPixmapTransform);p.drawImage(dst,current);p.drawImage(dst,branding);}}
   void mousePressEvent(QMouseEvent*)override {log("DISMISSED_BY_TOUCH");QApplication::quit();}
 };
 int main(int argc,char **argv){
