@@ -1,0 +1,6 @@
+#!/bin/sh
+# Delegate unchanged except for the competing C3 startup spinner.
+if [ "${1:-}" = "./spinner.py" ] && [ "$(pwd -P)" = /data/openpilot/system/ui ] && [ -n "${NIRO_BOOT_ROOT:-}" ]; then
+  exec /usr/local/venv/bin/python3 "$NIRO_BOOT_ROOT/spinner-proxy.py"
+fi
+exec /usr/local/venv/bin/python3 "$@"

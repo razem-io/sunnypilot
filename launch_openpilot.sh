@@ -13,6 +13,14 @@ if [ "$MODEL" = "comma tici" ]; then
   # Force a failure if the launcher doesn't exist
   [ -x "$C3_LAUNCH_SH" ] || false
 
+  # Personal C3 splash runs independently; the normal launcher never waits.
+  export NIRO_BOOT_ROOT="$PWD/custom/niro_boot"
+  export NIRO_BOOT_STATE_DIR="/data/local/niro-boot"
+  if [ -x "$NIRO_BOOT_ROOT/niro-splash" ] && mkdir -p "$NIRO_BOOT_STATE_DIR"; then
+    export PATH="$NIRO_BOOT_ROOT/bin:$PATH"
+    /usr/bin/setsid "$NIRO_BOOT_ROOT/launch.sh" </dev/null >>"$NIRO_BOOT_STATE_DIR/boot.log" 2>&1 &
+  fi
+
   # If it exists, run it
   exec "$C3_LAUNCH_SH"
 fi
