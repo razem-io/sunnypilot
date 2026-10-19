@@ -23,7 +23,8 @@ prevent duplicate playback. If the UI is ready sooner, it takes over immediately
 startup is not delayed to finish the animation. Touch dismisses the splash.
 
 The native UI's 2160×1080 surface and 270° Wayland buffer transform are used.
-Playback uses lightweight 836×471 frames with wall-clock selection, then the
+Playback uses full-source 1672×942 JPEG frames (quality 98, 4:4:4 chroma) with
+wall-clock selection, then the
 full-resolution final PNG. The artwork's aspect ratio is preserved. A full-resolution `branding.png` layer
 is drawn at the same coordinates on every frame, including the final hold, so
 JPEG compression cannot make the lettering flicker. `initial.png` is black.
@@ -85,10 +86,10 @@ Bootloader code, BMP headers, partition metadata and other partitions remain int
 A full read-back verifies the write. On an ordinary write failure it restores
 previous contents; the persistent backup also supports manual recovery.
 
-The exact native 2160×1080 initial screenshot is rotated 90° counter-clockwise
-into `early-logo-portrait.png` (1080×2160). This is the inverse of the player's
-270° buffer transform, as specified by the
-[Wayland protocol](https://wayland.freedesktop.org/docs/html/apa.html#protocol-spec-wl_surface-request-set_buffer_transform).
+The exact native 2160×1080 initial screenshot is rotated 90° clockwise
+into `early-logo-portrait.png` (1080×2160). The physical C3 test showed that the prior counter-clockwise mapping displayed
+the early image upside down until the animation. The corrected mapping adds
+180° to both early boot stages; the confirmed native animation is unchanged.
 The same lossless image becomes Weston's background. Its startup conversion is
 changed to PNG to avoid JPEG changes at the handoff. The system filesystem is
 remounted writable only during installation, then returned to read-only.
@@ -108,4 +109,4 @@ this revised early-logo sequence still needs visual confirmation after reboot.
 
 To regenerate the early asset after changing the artwork, rebuild and run the
 native `--test` on AGNOS, retrieve `test/initial-screen.png`, then use Pillow's
-`transpose(Image.Transpose.ROTATE_90)` and save it as `early-logo-portrait.png`.
+`transpose(Image.Transpose.ROTATE_270)` and save it as `early-logo-portrait.png`.

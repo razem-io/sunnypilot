@@ -73,7 +73,7 @@ def main():
     pixels = bmp.getvalue()[54:]
     assert len(pixels) == PIXEL_LENGTH
     updated = original[:PIXEL_OFFSET] + pixels + original[PIXEL_OFFSET+PIXEL_LENGTH:]
-    assert current in (original, updated), 'Unknown modified splash; refusing to overwrite'
+    assert current in (original, updated) or digest(current) == '7cd70e2dc50ded803a8e4b87dbc85ee5fe15388a769f13469a2bd5aaf1595d74', 'Unknown modified splash; refusing to overwrite'
     original_bg = (BACKUP/'bg.jpg').read_bytes()
     original_service = (BACKUP/'weston.service').read_bytes()
     old = b'.save("/tmp/bg.jpg")'
@@ -84,7 +84,7 @@ def main():
     assert original_service.count(old) == 1, 'Unrecognized Weston setup'
     updated_service = original_service.replace(old,new)
     updated_bg = (ROOT/'early-logo-portrait.png').read_bytes()
-    assert BG.read_bytes() in (original_bg, updated_bg), 'Background modified by another installation'
+    assert BG.read_bytes() in (original_bg, updated_bg) or digest(BG.read_bytes()) == 'df60bf3ee8791e327520e5d1f4aafa5410b8905fcd00c2852e2e45af8c9033ac', 'Background modified by another installation'
     assert SERVICE.read_bytes() in (original_service,updated_service), 'Weston unit modified by another installation'
     restoring = sys.argv[1] == '--restore'
     target, bg, service = (original,original_bg,original_service) if restoring else (updated,updated_bg,updated_service)

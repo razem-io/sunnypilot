@@ -101,7 +101,7 @@ for n in range(FPS*DURATION):
     if n <= 130 or 234 <= n <= 287:
         runtime = Image.new("RGB",(W,H+H%2))
         runtime.paste(Image.fromarray(frame_pixels),(0,0))
-        runtime.resize((836,471),Image.Resampling.LANCZOS).save(ROOT.parent / "frames" / f"{n:03}.jpg",quality=94)
+        runtime.save(ROOT.parent / "frames" / f"{n:03}.jpg",quality=98,subsampling=0)
     assert np.array_equal(frame_pixels[branding == 1], np.asarray(im)[branding == 1]), "Branding moved or faded"
     if n in sample_frames:
         Image.fromarray(frame_pixels).save(REVIEW/f'frame-{sample_frames[n]:.1f}s.png')
