@@ -5,6 +5,8 @@
 #include <QOpenGLShaderProgram>
 #include <QOpenGLTexture>
 #include <QMouseEvent>
+#include <QTouchEvent>
+#include "selfdrive/ui/qt/onroad/model.h"
 #include <QFile>
 #include <QPushButton>
 #include <memory>
@@ -13,6 +15,9 @@
 #include "niro_scene_mesh.h"
 #include "visual_timing.h"
 #include "lane_motion.h"
+#include "suspension.h"
+#include "road_camera.h"
+#include "selfdrive/ui/qt/widgets/cameraview.h"
 #include <QPainter>
 #include <QTimer>
 #include <QElapsedTimer>
@@ -23,13 +28,18 @@
 
 // Desktop prototype: fixed world camera, no image processing and no control output.
 // leadsV3 entries are time hypotheses, NOT a list of distinct vehicles.
-class RoadScene : public QOpenGLWidget {
+class RoadScene : public CameraWidget {
  struct Curve {std::array<float,31> y{};bool valid=false;float certainty=0; qint64 lastSeen=0;};
  float changeStart=0,changeCenter=0,changeWidth=3.5f,changePeak=0;bool changeRemapped=false;
  float laneTarget=0,laneOffset=0,cameraOffset=0,previousCenter=0,egoYaw=0;bool laneTracking=false;int laneState=0,laneDirection=0;uint64_t lastModelTimestamp=0;
+ bool cameraMode=false;float cameraBlend=0;QElapsedTimer cameraAge;QImage cameraVeil;QPushButton *cameraButton=nullptr,*demoButton=nullptr,*motionButton=nullptr;bool demoManual=false,cameraSuspension=false;float cameraSuspensionBlend=0,cameraRoll=0,cameraPitch=0,cameraHeave=0;
  Curve path,lanes[4],edges[2]; QPushButton *settingsButton=nullptr;
- NiroSceneMesh niro; QMatrix4x4 cameraMatrix; float transition=0,orbit=2.32f,elevation=.32f; QPointF pointer; bool dragging=false; QElapsedTimer clock;
+ ModelRenderer cameraModel;std::unique_ptr<QOpenGLTexture> cameraOverlay;uint64_t overlayFrame=0;
+ QElapsedTimer touchAge;int touchCount=0;bool touchMoved=false;QMap<int,QPointF> touchOrigins;
+ RoadCamera roadCamera;NiroSceneMesh niro; QMatrix4x4 cameraMatrix; float transition=0,orbit=2.32f,elevation=.32f; QPointF pointer; bool dragging=false; QElapsedTimer clock;
  QTimer timer;QElapsedTimer tick,modelAge;uint64_t modelFrame=0;float speed=0,phase=0,dashPhase=0;
+ SubMaster motionSensors{std::vector<const char*>{"accelerometer"}};
+ QVector3D accelerationBaseline;bool motionInitialized=false;float bodyRoll=0,bodyPitch=0,bodyHeave=0;NiroSpring rollSpring,pitchSpring,heaveSpring;std::array<float,4> wheelSpin{};
  bool valid=false,carValid=false,assistValid=false,engaged=false,lead=false;float leadX=0,leadY=0,leadAlpha=0; qint64 leadSeen=0;int count=0;
  QRectF sceneRect()const{return rect();}
  QPointF project(float x,float y,float z=0)const {auto v=cameraMatrix*QVector4D(-x,z,-y-laneOffset,1);if(v.w()<.1f)return {-10000,-10000};auto r=sceneRect();return {r.left()+(v.x()/v.w()+1)*r.width()/2,r.top()+(1-v.y()/v.w())*r.height()/2};}
@@ -56,14 +66,51 @@ class RoadScene : public QOpenGLWidget {
  }
  void updateModel(){
   auto&s=*uiStateSP();auto&sm=*s.sm;float dt=std::clamp(tick.restart()/1000.f,.001f,.1f);
+  motionSensors.update(0);
+  float targetRoll=0,targetPitch=0,targetHeave=0;
+  if(motionSensors.alive("accelerometer")&&motionSensors.valid("accelerometer")){
+   auto a=motionSensors["accelerometer"].getAccelerometer();
+   if(a.isAcceleration()&&a.getAcceleration().getV().size()==3){
+    auto v=a.getAcceleration().getV();QVector3D measured(-v[2],-v[1],-v[0]);
+    if(std::isfinite(measured.lengthSquared())&&measured.length()<30){
+     if(!motionInitialized){accelerationBaseline=measured;motionInitialized=true;}
+     accelerationBaseline+=(measured-accelerationBaseline)*niro_visual::blend(dt,3.f);
+     auto dynamic=measured-accelerationBaseline;
+     targetRoll=std::clamp(-dynamic.y()*2.6f,-4.5f,4.5f);
+     targetPitch=std::clamp(dynamic.x()*2.2f,-3.5f,3.5f);
+     targetHeave=std::clamp(dynamic.z()*.025f,-.065f,.065f);
+    }
+   }
+  }else motionInitialized=false;
+  cameraSuspensionBlend+=(float(cameraSuspension)-cameraSuspensionBlend)*niro_visual::blend(dt,.4f);
+  bodyRoll=rollSpring.step(targetRoll,dt,4.5f);
+  bodyPitch=pitchSpring.step(targetPitch,dt,3.5f);
+  bodyHeave=heaveSpring.step(targetHeave,dt,.065f);
+  // A softly isolated camera mount: retain body coupling without full jolts.
+  const float cameraResponse=niro_visual::blend(dt,.22f);
+  cameraRoll+=(bodyRoll*.60f-cameraRoll)*cameraResponse;
+  cameraPitch+=(bodyPitch*.60f-cameraPitch)*cameraResponse;
+  cameraHeave+=(bodyHeave*.65f-cameraHeave)*cameraResponse;
+  bool freshCamera=cameraAge.isValid()&&cameraAge.elapsed()<500;
+  cameraBlend+=(float(cameraMode&&freshCamera)-cameraBlend)*niro_visual::blend(dt,.55f);
   carValid=sm.alive("carState")&&sm.valid("carState")&&sm["carState"].getCarState().getCanValid();
   speed=carValid?std::max(0.f,sm["carState"].getCarState().getVEgo()):0;
-  assistValid=sm.alive("selfdriveState")&&sm.valid("selfdriveState");engaged=assistValid&&sm["selfdriveState"].getSelfdriveState().getActive();phase=std::fmod(phase+speed*dt,12.f);dashPhase=std::fmod(dashPhase+speed*dt,21.f);transition+=(float(engaged)-transition)*(1-std::exp(-dt/.65f));laneOffset+=std::clamp((laneTarget-laneOffset)*niro_visual::blend(dt,.3f),-.9f*dt,.9f*dt);cameraOffset+=(laneOffset-cameraOffset)*niro_visual::blend(dt,1.1f);
+  assistValid=sm.alive("selfdriveState")&&sm.valid("selfdriveState");engaged=assistValid&&sm["selfdriveState"].getSelfdriveState().getActive();phase=std::fmod(phase+speed*dt,12.f);dashPhase=std::fmod(dashPhase+speed*dt,21.f);transition+=(float(engaged&&!demoManual)-transition)*(1-std::exp(-dt/.65f));laneOffset=cameraOffset=0; // Steering drives pose; no extra lane-change orbit.
+  if(carValid){
+   auto car=sm["carState"].getCarState();auto wheels=car.getWheelSpeeds();
+   std::array<float,4> speeds{wheels.getFl(),wheels.getFr(),wheels.getRl(),wheels.getRr()};
+   bool available=std::any_of(speeds.begin(),speeds.end(),[](float v){return std::isfinite(v)&&v>.01f;});
+   float direction=car.getGearShifter()==cereal::CarState::GearShifter::REVERSE?-1.f:1.f;
+   for(int i=0;i<4;i++){
+    float v=available?speeds[i]:speed;
+    if(std::isfinite(v)&&v>=0&&v<100)wheelSpin[i]=std::fmod(wheelSpin[i]+direction*v/.3285f*180.f/M_PI*dt,360.f);
+   }
+  }
   auto frame=sm.rcv_frame("modelV2");
   if(frame!=modelFrame){float interval=modelAge.isValid()?modelAge.elapsed()/1000.f:.05f;modelAge.restart();modelFrame=frame;
    auto m=sm["modelV2"].getModelV2();float alpha=1-std::exp(-std::min(interval,1.f)/.65f);
    uint64_t timestamp=sm["modelV2"].getLogMonoTime();
-   if(lastModelTimestamp && timestamp<lastModelTimestamp){laneTarget=laneOffset=cameraOffset=0;laneTracking=false;for(auto &c:lanes)c=Curve{};for(auto &c:edges)c=Curve{};path=Curve{};}
+   if(lastModelTimestamp && timestamp<lastModelTimestamp){laneTarget=laneOffset=cameraOffset=0;laneTracking=false;motionInitialized=false;bodyRoll=bodyPitch=bodyHeave=0;cameraRoll=cameraPitch=cameraHeave=0;rollSpring.reset();pitchSpring.reset();heaveSpring.reset();for(auto &c:lanes)c=Curve{};for(auto &c:edges)c=Curve{};path=Curve{};}
    lastModelTimestamp=timestamp;
    laneState=int(m.getMeta().getLaneChangeState());laneDirection=int(m.getMeta().getLaneChangeDirection());
    auto rawLanes=m.getLaneLines();auto rawProbs=m.getLaneLineProbs();bool changing=laneState==2||laneState==3;
@@ -87,7 +134,10 @@ class RoadScene : public QOpenGLWidget {
    bool previousLead=lead;lead=previousLead&&clock.elapsed()-leadSeen<3000;auto leads=m.getLeadsV3();if(leads.size()){auto l=leads[0];auto x=l.getX(),y=l.getY();if(l.getProb()>.6&&std::abs(l.getProbTime())<.01&&x.size()&&y.size()&&std::isfinite(x[0])&&std::isfinite(y[0])&&x[0]>3&&x[0]<120){lead=true;leadSeen=clock.elapsed();bool reset=!previousLead||std::abs(leadX-x[0])>25||std::abs(leadY-(y[0]-pathAt(x[0])))>4;float blend=1-std::exp(-std::min(interval,1.f)/.75f);leadX=reset?x[0]:leadX+blend*(x[0]-leadX);float offset=y[0]-pathAt(x[0]);leadY=reset?offset:leadY+blend*(offset-leadY);}}
   }
   if(!sm.alive("modelV2")||!sm.valid("modelV2")){laneState=0;laneTracking=false;}
-  float yawTarget=(laneState==2||laneState==3)&&path.valid?std::clamp(float(std::atan2(pathAt(12)-pathAt(0),12.f)*180/M_PI),-12.f,12.f):0.f;
+  // The predicted path bends back while settling into a lane; it is not
+  // the current vehicle heading. Use measured steering for the visual turn.
+  // Positive steering is left; egoYaw is right-positive (draw uses -egoYaw).
+  float yawTarget=carValid&&speed>1.f?std::clamp(-smCarWheel()*3.5f,-10.f,10.f):0.f;
   egoYaw+=(yawTarget-egoYaw)*niro_visual::blend(dt,.45f);
   float opacityTarget=lead?niro_visual::leadOpacity((clock.elapsed()-leadSeen)/1000.f):0;leadAlpha=opacityTarget>leadAlpha?leadAlpha+(opacityTarget-leadAlpha)*niro_visual::blend(dt,.2f):opacityTarget;
   valid=path.valid&&modelAge.isValid()&&modelAge.elapsed()<500&&sm.alive("modelV2")&&sm.valid("modelV2");update();
@@ -95,42 +145,136 @@ class RoadScene : public QOpenGLWidget {
  float steeringRatio()const {auto&sm=*uiStateSP()->sm;float ratio=sm["carParams"].getCarParams().getSteerRatio();if(std::isfinite(ratio)&&ratio>1&&ratio<100)return ratio;auto lp=sm["liveParameters"].getLiveParameters();if(sm.alive("liveParameters")&&sm.valid("liveParameters")&&lp.getValid()&&lp.getSteerRatioValid()){ratio=lp.getSteerRatio();if(std::isfinite(ratio)&&ratio>1&&ratio<100)return ratio;}return 0;}
  float smCarWheel()const {float ratio=steeringRatio();if(!carValid||ratio<=1)return 0;auto&sm=*uiStateSP()->sm;return std::clamp(sm["carState"].getCarState().getSteeringAngleDeg()/ratio,-45.f,45.f);}
 public:
- std::function<void()> openSettings;
- explicit RoadScene(QWidget*parent=nullptr):QOpenGLWidget(parent){clock.start();tick.start();connect(&timer,&QTimer::timeout,this,[this]{updateModel();});timer.start(33);settingsButton=new QPushButton(this);settingsButton->setStyleSheet("QPushButton{background:transparent;color:#718b98;border:none;font-size:22px;}");settingsButton->setAccessibleName("Einstellungen");settingsButton->setToolTip("Einstellungen öffnen");QPixmap gearIcon(64,64);gearIcon.fill(Qt::transparent);{QPainter g(&gearIcon);g.setRenderHint(QPainter::Antialiasing);g.setPen(QPen(QColor("#718b98"),7));g.drawEllipse(QPointF(32,32),17,17);g.drawEllipse(QPointF(32,32),6,6);for(int i=0;i<8;i++){g.save();g.translate(32,32);g.rotate(i*45);g.drawLine(QPointF(0,18),QPointF(0,26));g.restore();}}settingsButton->setIcon(QIcon(gearIcon));settingsButton->setIconSize(QSize(44,44));connect(settingsButton,&QPushButton::clicked,this,[this]{if(openSettings)openSettings();});}
+ void toggleCamera(){cameraButton->toggle();}
+ void setSettingsAction(std::function<void()> action){connect(settingsButton,&QPushButton::clicked,this,std::move(action));}
+ explicit RoadScene(QWidget*parent=nullptr):CameraWidget("camerad",VISION_STREAM_ROAD,parent){
+ connect(this,&CameraWidget::vipcThreadFrameReceived,this,[this]{cameraAge.restart();});
+ cameraButton=new QPushButton("Kamera",this);cameraButton->setCheckable(true);cameraButton->setChecked(false);cameraButton->setAccessibleName("Kamerabild einblenden");cameraButton->setToolTip("Zwischen Kamerabild und 3D-Straße wechseln");cameraButton->setStyleSheet("QPushButton{background:transparent;border:none;color:#718b98;font-size:21px;}QPushButton:checked{color:#6cdde8;}");connect(cameraButton,&QPushButton::toggled,this,[this](bool enabled){cameraMode=enabled;});
+ demoButton=new QPushButton("Demo: frei drehen",this);demoButton->setCheckable(true);demoButton->setAccessibleName("Demoansicht frei drehen");demoButton->setStyleSheet(cameraButton->styleSheet());
+ connect(demoButton,&QPushButton::toggled,this,[this](bool enabled){demoManual=enabled;demoButton->setText(enabled?"Zur Fahransicht":"Demo: frei drehen");if(enabled)cameraButton->setChecked(false);});
+ motionButton=new QPushButton("Kamera federt",this);motionButton->setCheckable(true);motionButton->setAccessibleName("Kamera mit Federung bewegen");motionButton->setStyleSheet(cameraButton->styleSheet());motionButton->setToolTip("Test: Kamerabild an Karosseriebewegung koppeln");connect(motionButton,&QPushButton::toggled,this,[this](bool on){cameraSuspension=on;});
+ setAttribute(Qt::WA_AcceptTouchEvents);cameraButton->setAttribute(Qt::WA_AcceptTouchEvents);cameraButton->installEventFilter(this);
+ clock.start();tick.start();connect(&timer,&QTimer::timeout,this,[this]{updateModel();});timer.start(33);settingsButton=new QPushButton(this);settingsButton->setStyleSheet("QPushButton{background:transparent;color:#718b98;border:none;font-size:22px;}");settingsButton->setAccessibleName("Einstellungen");settingsButton->setToolTip("Einstellungen öffnen");QPixmap gearIcon(64,64);gearIcon.fill(Qt::transparent);{QPainter g(&gearIcon);g.setRenderHint(QPainter::Antialiasing);g.setPen(QPen(QColor("#718b98"),7));g.drawEllipse(QPointF(32,32),17,17);g.drawEllipse(QPointF(32,32),6,6);for(int i=0;i<8;i++){g.save();g.translate(32,32);g.rotate(i*45);g.drawLine(QPointF(0,18),QPointF(0,26));g.restore();}}settingsButton->setIcon(QIcon(gearIcon));settingsButton->setIconSize(QSize(44,44));for(auto *b:{demoButton,settingsButton,motionButton}){b->setAttribute(Qt::WA_AcceptTouchEvents);b->installEventFilter(this);}}
 protected:
- void resizeEvent(QResizeEvent*e)override{QOpenGLWidget::resizeEvent(e);if(settingsButton)settingsButton->setGeometry(2010*width()/2160,35*height()/1080,85*width()/2160,85*height()/1080);}
- void initializeGL()override{niro.initialize();}
- void mousePressEvent(QMouseEvent*e)override{pointer=e->localPos();dragging=!engaged&&QRectF(width()*.23,height()*.16,width()*.54,height()*.68).contains(pointer);}
- void mouseMoveEvent(QMouseEvent*e)override{if(dragging&&!engaged){orbit+=(e->localPos().x()-pointer.x())*.005f;elevation=std::clamp(float(elevation+(e->localPos().y()-pointer.y())*.004f),.1f,1.48f);pointer=e->localPos();update();}}
+ bool handleTouch(QEvent *event,QPushButton *button=nullptr){
+  if(event->type()!=QEvent::TouchBegin&&event->type()!=QEvent::TouchUpdate&&event->type()!=QEvent::TouchEnd&&event->type()!=QEvent::TouchCancel)return false;
+  auto *touch=static_cast<QTouchEvent*>(event);
+  if(event->type()==QEvent::TouchBegin){touchAge.restart();touchCount=0;touchMoved=false;touchOrigins.clear();dragging=false;}
+  int down=0;
+  for(const auto &point:touch->touchPoints()){
+   if(point.state()!=Qt::TouchPointReleased)down++;
+   if(!touchOrigins.contains(point.id()))touchOrigins[point.id()]=point.screenPos();
+   if(QLineF(touchOrigins[point.id()],point.screenPos()).length()>35)touchMoved=true;
+  }
+  touchCount=std::max(touchCount,down);
+  if(!button&&(!engaged||demoManual)&&touchCount==1&&event->type()==QEvent::TouchUpdate&&touch->touchPoints().size()==1){auto point=touch->touchPoints().first();if(QRectF(width()*.23,height()*.16,width()*.54,height()*.68).contains(point.startPos())){orbit+=(point.pos().x()-point.lastPos().x())*.005f;elevation=std::clamp(float(elevation+(point.pos().y()-point.lastPos().y())*.004f),.1f,1.48f);}}
+
+  if(event->type()==QEvent::TouchEnd){if(touchCount==3&&!touchMoved&&touchAge.isValid()&&touchAge.elapsed()<650)cameraButton->toggle();else if(button&&touchCount==1&&!touchMoved&&touchAge.elapsed()<650)button->click();touchCount=0;}
+  if(event->type()==QEvent::TouchCancel)touchCount=0;
+  event->accept();return true;
+ }
+ bool event(QEvent *e)override{if(handleTouch(e))return true;return CameraWidget::event(e);}
+ bool eventFilter(QObject *object,QEvent *e)override{if(handleTouch(e,qobject_cast<QPushButton*>(object)))return true;return CameraWidget::eventFilter(object,e);}
+ mat4 calcFrameMatrix()override{
+  // Cover the scene without letterbox edges; the vignette supplies its silhouette.
+  float aspect=float(width())/std::max(1,height());float cameraAspect=float(stream_width)/std::max(1,stream_height);
+  float x=std::max(cameraAspect/aspect,1.f),y=std::max(aspect/cameraAspect,1.f);
+  return mat4{{x,0,0,0, 0,y,0,0, 0,0,1,0, 0,0,0,1}};
+ }
+ void resizeEvent(QResizeEvent*e)override{QOpenGLWidget::resizeEvent(e);if(motionButton)motionButton->setGeometry(1760*width()/2160,975*height()/1080,330*width()/2160,75*height()/1080);if(demoButton)demoButton->setGeometry(1240*width()/2160,35*height()/1080,270*width()/2160,85*height()/1080);if(cameraButton)cameraButton->setGeometry(1510*width()/2160,35*height()/1080,180*width()/2160,85*height()/1080);cameraVeil=QImage();if(settingsButton)settingsButton->setGeometry(2010*width()/2160,35*height()/1080,85*width()/2160,85*height()/1080);}
+ void initializeGL()override{CameraWidget::initializeGL();niro.initialize();roadCamera.initialize();}
+ void mousePressEvent(QMouseEvent*e)override{pointer=e->localPos();dragging=(!engaged||demoManual)&&QRectF(width()*.23,height()*.16,width()*.54,height()*.68).contains(pointer);}
+ void mouseMoveEvent(QMouseEvent*e)override{if(dragging&&(!engaged||demoManual)){orbit+=(e->localPos().x()-pointer.x())*.005f;elevation=std::clamp(float(elevation+(e->localPos().y()-pointer.y())*.004f),.1f,1.48f);pointer=e->localPos();update();}}
  void mouseReleaseEvent(QMouseEvent*)override{dragging=false;}
  void paintGL()override{
-  float angle=orbit*(1-transition);float elev=elevation*(1-transition)+.38f*transition;float distance=7.6f+2.4f*transition;QVector3D eye(distance*std::cos(angle)*std::cos(elev),.7f+distance*std::sin(elev),distance*std::sin(angle)*std::cos(elev));QVector3D target(-6*transition,.6f,0);eye.setZ(eye.z()-cameraOffset);target.setZ(target.z()-cameraOffset);QMatrix4x4 view,projection;view.lookAt(eye,target,{0,1,0});projection.perspective(34+14*transition,sceneRect().width()/sceneRect().height(),.1,220);cameraMatrix=projection*view;
+  float angle=orbit*(1-transition);float elev=elevation*(1-transition)+.38f*transition;float distance=7.6f+2.4f*transition;QVector3D eye(distance*std::cos(angle)*std::cos(elev),.7f+distance*std::sin(elev),distance*std::sin(angle)*std::cos(elev));QVector3D target(-6*transition,.6f,0);eye.setX(eye.x()+2.2f*cameraBlend);target.setX(target.x()+2.2f*cameraBlend);// A low chase viewpoint limits the parallax introduced by the ground projection.
+  float hybrid=cameraBlend*transition;
+  eye=eye*(1-hybrid)+QVector3D(11.5f,2.8f,0)*hybrid;
+  target=target*(1-hybrid)+QVector3D(-12.f,.8f,0)*hybrid;
+  eye.setZ(eye.z()-cameraOffset);target.setZ(target.z()-cameraOffset);QMatrix4x4 view,projection;view.lookAt(eye,target,{0,1,0});projection.perspective(34+14*transition-6*hybrid,sceneRect().width()/sceneRect().height(),.1,220);projection(1,2)=-.08f*hybrid;cameraMatrix=projection*view;
 
+  if(cameraBlend>.001f){glDisable(GL_DEPTH_TEST);glDisable(GL_SCISSOR_TEST);glDisable(GL_BLEND);CameraWidget::paintGL();}
   QPainter p(this);p.setRenderHint(QPainter::Antialiasing);QLinearGradient bg(0,0,0,height());bg.setColorAt(0,QColor("#17232e"));bg.setColorAt(.3,QColor("#243440"));bg.setColorAt(1,QColor("#0a1018"));p.fillRect(rect(),bg);
+  if(cameraBlend>.001f&&stream_width>0&&stream_height>0){
+   p.end();auto &state=*uiStateSP();auto calibration=state.sm->operator[]("liveCalibration").getLiveCalibration();
+   float cameraHeight=1.22f;auto heights=calibration.getHeight();if(heights.size()&&std::isfinite(heights[0])&&heights[0]>.5f&&heights[0]<3)cameraHeight=heights[0];
+   Eigen::Matrix3f intrinsic=FCAM_INTRINSIC_MATRIX;
+   // The original demo uses the 1928x1208 AR0231 road camera.
+   intrinsic.row(0)*=float(stream_width)/1928;intrinsic.row(1)*=float(stream_height)/1208;
+   Eigen::Matrix3f transform=(intrinsic*state.scene.view_from_calib).inverse();QMatrix3x3 cameraTransform;
+   for(int r=0;r<3;r++)for(int c=0;c<3;c++)cameraTransform(r,c)=transform(r,c);
+   bool overlayValid=valid&&calibration.getHeight().size()>0&&state.sm->operator[]("modelV2").getModelV2().getPosition().getX().size()>1;
+   if(overlayValid&&(!cameraOverlay||overlayFrame!=modelFrame)){
+    QImage overlay(stream_width,stream_height,QImage::Format_RGBA8888);overlay.fill(Qt::transparent);
+    QPainter annotation(&overlay);annotation.setRenderHint(QPainter::Antialiasing);annotation.setPen(Qt::NoPen);
+    cameraModel.setTransform(intrinsic*state.scene.view_from_calib);cameraModel.draw(annotation,overlay.rect());annotation.end();
+    if(!cameraOverlay){cameraOverlay=std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);cameraOverlay->setSize(stream_width,stream_height);cameraOverlay->setFormat(QOpenGLTexture::RGBA8_UNorm);cameraOverlay->allocateStorage(QOpenGLTexture::RGBA,QOpenGLTexture::UInt8);cameraOverlay->setMinMagFilters(QOpenGLTexture::Linear,QOpenGLTexture::Linear);cameraOverlay->setWrapMode(QOpenGLTexture::ClampToEdge);}
+    cameraOverlay->setData(QOpenGLTexture::RGBA,QOpenGLTexture::UInt8,overlay.constBits());overlayFrame=modelFrame;
+   }
+   // The video is an ego-mounted backdrop, not scenery at 85 m. Match its
+   // screen displacement to the near vehicle instead of introducing depth parallax.
+   QVector3D centeredEye=eye,centeredTarget=target;
+   centeredEye.setZ(centeredEye.z()+cameraOffset-laneOffset);
+   centeredTarget.setZ(centeredTarget.z()+cameraOffset-laneOffset);
+   QMatrix4x4 centeredView;centeredView.lookAt(centeredEye,centeredTarget,{0,1,0});
+   QMatrix4x4 centeredCamera=projection*centeredView;
+   QVector4D anchor(2.2f*cameraBlend,.7f,-laneOffset,1);
+   QVector4D actual=cameraMatrix*anchor,centered=centeredCamera*anchor;
+   QMatrix4x4 follow;
+   if(actual.w()>.1f&&centered.w()>.1f){
+    // Compensate for image enlargement so both move equal pixels.
+    follow.translate((actual.x()/actual.w()-centered.x()/centered.w())/RoadCamera::imageScale,
+                     (actual.y()/actual.w()-centered.y()/centered.w())/RoadCamera::imageScale,0);
+   }
+   // Share the Niro's damped heading. Pivot at the image center so yaw
+   // tilts the backdrop with the car without swinging an 85 m lever arm.
+   QMatrix4x4 imageHeading;
+   imageHeading.translate(-85.f,cameraHeight,-laneOffset);
+   imageHeading.rotate(-egoYaw,0,1,0);
+   imageHeading.translate(85.f,-cameraHeight,laneOffset);
+   // Optional rigid attachment to the same body roll/pitch pivot as the mesh.
+   // Original camera pixels and model annotations stay together.
+   QMatrix4x4 bodyAttachment;
+   bodyAttachment.translate(2.2f*cameraBlend,.5f,-laneOffset);
+   bodyAttachment.rotate(-egoYaw,0,1,0);
+   bodyAttachment.rotate(cameraRoll*cameraSuspensionBlend,1,0,0);
+   bodyAttachment.rotate(cameraPitch*cameraSuspensionBlend,0,0,1);
+   bodyAttachment.rotate(egoYaw,0,1,0);
+   bodyAttachment.translate(-2.2f*cameraBlend,-.5f,laneOffset);
+   QVector4D lifted=cameraMatrix*(anchor+QVector4D(0,cameraHeave*cameraSuspensionBlend,0,0));
+   if(lifted.w()>.1f&&actual.w()>.1f)follow.translate(
+    (lifted.x()/lifted.w()-actual.x()/actual.w())/RoadCamera::imageScale,
+    (lifted.y()/lifted.w()-actual.y()/actual.w())/RoadCamera::imageScale,0);
+   QMatrix4x4 videoCamera=follow*centeredCamera*bodyAttachment*imageHeading;
+   roadCamera.draw(videoCamera,cameraTransform,cameraHeight,laneOffset,textures[0],textures[1],stream_width,stream_height,cameraBlend,overlayValid&&cameraOverlay?cameraOverlay->textureId():0);
+   p.begin(this);p.setRenderHint(QPainter::Antialiasing);
+  }
   p.save();p.setClipRect(sceneRect());
-  p.setPen(QPen(QColor("#31505e"),1.5));p.setBrush(Qt::NoBrush);QPolygonF ring;for(int i=0;i<=96;i++){float a=i*2*M_PI/96;ring<<project(2.7*std::cos(a),1.75*std::sin(a),.005);}p.drawPolyline(ring);
-  if(valid&&transition>.01){
-   p.setOpacity(transition);
-   if(edges[0].valid&&edges[1].valid){QPolygonF asphalt;for(int x=-6;x<=120;x+=2)asphalt<<project(x,curveAt(edges[0],x));for(int x=120;x>=-6;x-=2)asphalt<<project(x,curveAt(edges[1],x));p.setPen(Qt::NoPen);p.setBrush(QColor("#273440"));p.setOpacity(transition*std::min(edges[0].certainty,edges[1].certainty));p.drawPolygon(asphalt);p.setOpacity(transition);}
+  p.setPen(QPen(QColor("#31505e"),1.5));p.setBrush(Qt::NoBrush);QPolygonF ring;for(int i=0;i<=96;i++){float a=i*2*M_PI/96;ring<<project(2.7*std::cos(a)-2.2f*cameraBlend,1.75*std::sin(a),.005);}p.drawPolyline(ring);
+  if(valid&&transition>.01&&cameraBlend<.999f){
+   const float roadOpacity=transition*(1-cameraBlend);
+   p.setOpacity(roadOpacity);
+   if(edges[0].valid&&edges[1].valid){QPolygonF asphalt;for(int x=-6;x<=120;x+=2)asphalt<<project(x,curveAt(edges[0],x));for(int x=120;x>=-6;x-=2)asphalt<<project(x,curveAt(edges[1],x));p.setPen(Qt::NoPen);p.setBrush(QColor("#273440"));p.setOpacity(roadOpacity*std::min(edges[0].certainty,edges[1].certainty));p.drawPolygon(asphalt);p.setOpacity(roadOpacity);}
    for(auto&e:edges)ribbon(p,e,.055,QColor(114,140,153,int(150*e.certainty)));
    ribbon(p,path,.82,engaged?QColor(50,191,219,90):QColor(120,159,185,55));
    for(auto&l:lanes)ribbon(p,l,.045,QColor(220,230,235,int(220*l.certainty)),true);
-   if(path.valid){p.setPen(QPen(QColor(85,207,226,100),2));for(float x=phase+5;x<110;x+=12){int i=std::min(29,int(x/4));float y=path.y[i];p.drawLine(project(x,y-.06,.015),project(x+1.8,y+.06,.015));}}
-   if(lead){p.setOpacity(transition*leadAlpha);auto q=project(leadX,pathAt(leadX)+leadY,2.1);p.setFont(QFont("Inter",20));p.setPen(QColor("#b9d7df"));p.drawText(QRectF(q.x()-130,q.y()-45,260,40),Qt::AlignCenter,QString::number(leadX,'f',0)+" m");}
+   if(lead){p.setOpacity(roadOpacity*leadAlpha);auto q=project(leadX,pathAt(leadX)+leadY,2.1);p.setFont(QFont("Inter",20));p.setPen(QColor("#b9d7df"));p.drawText(QRectF(q.x()-130,q.y()-45,260,40),Qt::AlignCenter,QString::number(leadX,'f',0)+" m");}
    p.setOpacity(1);
   }
+
   p.restore();p.end();
   auto vp=sceneRect();float pixel=devicePixelRatioF();
   float wheel=carValid?smCarWheel():0;
-  niro.draw(cameraMatrix,eye,wheel,width()*devicePixelRatioF(),height()*devicePixelRatioF(),QVector3D(0,0,-laneOffset),-egoYaw,true,1,QRect(vp.left()*pixel,(height()-vp.bottom())*pixel,vp.width()*pixel,vp.height()*pixel));
-  if(valid&&lead&&transition>.01){float y=pathAt(leadX)+leadY;float heading=std::atan2(pathAt(leadX+2)-pathAt(leadX-2),4.f)*180/M_PI;niro.draw(cameraMatrix,eye,0,width()*devicePixelRatioF(),height()*devicePixelRatioF(),QVector3D(-leadX,0,-y-laneOffset),-heading,false,.62f*transition*leadAlpha,QRect(vp.left()*pixel,(height()-vp.bottom())*pixel,vp.width()*pixel,vp.height()*pixel),true);}
+  niro.setCameraReflection(textures[0],textures[1],stream_width>0&&stream_height>0?cameraBlend:0.f);
+  niro.draw(cameraMatrix,eye,wheel,width()*devicePixelRatioF(),height()*devicePixelRatioF(),QVector3D(2.2f*cameraBlend,0,-laneOffset),-egoYaw,true,1,QRect(vp.left()*pixel,(height()-vp.bottom())*pixel,vp.width()*pixel,vp.height()*pixel),false,bodyRoll,bodyPitch,bodyHeave,wheelSpin);
+  if(valid&&lead&&transition>.01&&cameraBlend<.999f){float y=pathAt(leadX)+leadY;float heading=std::atan2(pathAt(leadX+2)-pathAt(leadX-2),4.f)*180/M_PI;niro.draw(cameraMatrix,eye,0,width()*devicePixelRatioF(),height()*devicePixelRatioF(),QVector3D(-leadX,0,-y-laneOffset),-heading,false,.62f*transition*leadAlpha*(1-cameraBlend),QRect(vp.left()*pixel,(height()-vp.bottom())*pixel,vp.width()*pixel,vp.height()*pixel),true);}
   p.begin(this);p.setRenderHint(QPainter::Antialiasing);
   p.save();p.setClipRect(sceneRect());
   auto car=(*uiStateSP()->sm)["carState"].getCarState();bool blink=clock.elapsed()%800<400;
   // Project the same four lamp anchors as the manual HTML scene. Hide far-side lamps.
   if(carValid){for(int side:{-1,1})for(int end:{-1,1}){bool visible=(end==1?eye.x()>0:eye.x()<0)||side*eye.z()>0;
    bool on=blink&&(side>0?car.getLeftBlinker():car.getRightBlinker());if(!on||!visible)continue;
-   auto at=project(end<0?1.75f:-1.85f,side*.74f,end<0?.74f:1.05f);p.setPen(QPen(QColor("#ffb234"),7));p.drawLine(at-QPointF(6,0),at+QPointF(6,0));}
+   float lampX=end<0?1.75f:-1.85f,lampY=-side*.74f,yaw=egoYaw*M_PI/180;auto at=project(lampX*std::cos(yaw)-lampY*std::sin(yaw)-2.2f*cameraBlend,lampX*std::sin(yaw)+lampY*std::cos(yaw),end<0?.74f:1.05f);p.setPen(QPen(QColor("#ffb234"),7));p.drawLine(at-QPointF(6,0),at+QPointF(6,0));}
   }
   if(engaged&&!valid){p.setPen(QColor("#f2c37b"));p.setFont(QFont("Inter",22));p.drawText(sceneRect(),Qt::AlignTop|Qt::AlignHCenter,"Keine aktuellen Modelldaten");}
   p.restore();p.scale(width()/2160.,height()/1080.);
@@ -174,6 +318,6 @@ protected:
   if(connect!="Online")p.drawLine(293,1014,337,970);
   p.restore();
   setToolTip(QString("Netzwerk: %1 · Temperatur: %2 · Panda: %3 · Connect: %4 (Replay)").arg(network,thermal,pandaFresh?(panda?"Verbunden":"Nicht verbunden"):"Unbekannt",connect));
-  text(64,1020,16,"STATUS AUS AUFZEICHNUNG · REPLAY",muted);text(850,1020,16,"Gestrichelt: Spur (schematisch) · Durchgezogen: Fahrbahnrand",muted);
+  text(64,1020,16,demoManual?"DEMOANSICHT · DATEN AUS REPLAY":"STATUS AUS AUFZEICHNUNG · REPLAY",muted);text(850,1020,16,cameraMode?(cameraAge.isValid()&&cameraAge.elapsed()<500?"HYBRID · KAMERABILD":"Kamerabild fehlt · 3D-Ansicht"):"Gestrichelt: Spur (schematisch) · Durchgezogen: Fahrbahnrand",muted);
  }
 };

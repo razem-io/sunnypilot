@@ -59,3 +59,8 @@ OpenGL z so left changes render left. Replay seeks reset the lateral origin.
 checks the cached full-rate segment: approximately 3.06 m left and one lane-index
 reassignment. Visual checks show leftward ego displacement and camera recentering;
 subjective smoothness remains to be assessed in the running loop.
+
+Replay send failures now preserve services for transient EINTR/EAGAIN errors.
+Previously any failed send permanently disabled that service and reported a
+multiple-publisher error, leaving the dashboard at unknown assist status.
+Other send failures still disable the service and now report the actual errno.

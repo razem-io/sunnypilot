@@ -82,3 +82,217 @@ Build erfolgreich; test_lane_motion.cc prüft Richtung, Indexwechsel, ungültige
 ## Feste Statusplätze und Gangreihe
 
 Netzwerk, Thermometer, Panda und Connect besitzen nun feste, gleichmäßig verteilte Plätze. Das Thermometer bleibt auch bei normaler Temperatur sichtbar in Grau; Warnungen behalten die Warnfarbe. Inaktive Panda-/Connect-Symbole bleiben grau mit Trennmarkierung sichtbar. Gangreihe P/R/N/D dauerhaft; nur der aktuell gültige Gang wird hell hervorgehoben. N verhindert eine mehrdeutige Anzeige im Leerlauf. Bei fehlenden Fahrzeugdaten sind alle Buchstaben grau und „Gang unbekannt“ erscheint. Gangbuchstaben sind in derselben 85-Pixel-Zeile wie das Zahnrad vertikal zentriert. Keine zusätzlichen Rot-/Blauzuordnungen.
+
+
+## Camera vignette experiment (20 October 2026)
+
+The top-row Kamera toggle blends the original road-camera VisionIPC stream into
+the existing dashboard. The center is opaque; an elliptical feather returns the
+image to the dashboard background at the edges. The video covers the canvas
+without letterboxing. The transition uses a 0.55 s exponential blend.
+Synthetic road, path and ghost lead fade out with the video; ego Niro, telemetry,
+settings and the original alert overlay remain. If no camera frames arrive for
+500 ms, the video fades out and the model scene returns.
+
+This is a compositing experiment, not a calibrated augmented-reality projection:
+the camera is mounted on the recorded vehicle, while the 3D camera looks from
+behind the displayed Niro. No novel rear viewpoint or image stabilization is
+reconstructed. Native build and toggling both directions were visually checked.
+During development the replay model publisher stopped once; restarting replay
+restored model messages. Long-term playback stability is not established.
+
+
+### Calibrated ground-plane hybrid experiment
+
+`road_camera.h` projects the original NV12 road-camera textures onto z=0 in
+the native world using `FCAM_INTRINSIC_MATRIX * scene.view_from_calib` and
+`liveCalibration.height[0]` (observed ~1.154 m). Missing height falls back to
+1.22 m. Intrinsics assume the demo AR0231 camera, scaled to the received frame
+size; other camera sensors require their matching intrinsic matrix.
+This supersedes the flat vignette above. Ground x/y project into camera pixels
+with z=height, then are viewed through the same 3D matrix as the road and ego.
+The Niro and virtual viewpoint move 1.5 m rearward in hybrid mode for visual
+placement; that offset is an artistic placement, not a measured camera-to-car
+transform. Only the two inner model lane boundaries overlay the video.
+
+Projective interpolation avoids treating the camera as a flat screen. Image
+borders and the far plane fade softly. Pixels of elevated objects are still
+flattened onto the ground: vehicles visibly stretch, and slopes are not modeled.
+The current prototype tests ground alignment, not full scene reconstruction or
+calibrated AR for arbitrary vehicles. Build, projection direction/inverse checks,
+and both UI toggle directions passed; the hybrid is left active in the replay.
+
+
+### Expanded hybrid image
+
+The image now uses a 48x48 UV mesh. Calibrated rays intersect the ground up to
+100 m; farther and upper rays meet a vertical backdrop at 100 m. This retains
+the sky and upper scene previously discarded by ground-only projection, and
+reduces feathering to 4.5% at each image border. The backdrop is an explicit
+visual approximation, not reconstructed depth. Ground alignment is retained
+in the near field. Build and the expanded live camera view were checked.
+
+
+### Low hybrid viewpoint
+
+Hybrid mode now blends to a low chase camera (height 1.65 m, x=11.5 m),
+a nearly horizontal look direction, 38-degree vertical field of view and a
+small lens shift. The pure 3D camera remains unchanged. This reduces vertical
+stretching in the far field; nearby vehicles at the sides still deform because
+the ground-plane interpretation lacks object depth. Native build and the live
+view were checked. This is a visual improvement, not a depth reconstruction.
+
+
+### Center-preserving hybrid compromise
+
+Hybrid viewpoint raised to 2.8 m, looking at (-12, .8, 0), with 42-degree FOV.
+Central image rays are now placed on a common 40 m image plane instead of the
+ground. This preserves central traffic proportions. Horizontal smoothstep blends
+back to ground toward the edges; the bottom 28% transitions into the foreground.
+This is deliberately artistic warping: the central image and synthetic lane
+boundaries are no longer guaranteed to coincide. Side and foreground distortion
+remain visible. Native build passed and the central vehicle proportions were
+visually checked in replay. Pure 3D mode retains its previous viewpoint.
+
+
+### Straight full-image backdrop
+
+The accepted 2.8 m viewpoint and 42-degree FOV are retained. The ego visual
+placement is moved from 1.5 to 2.2 m rearward. All camera rays now intersect a
+common 85 m plane, removing the differential depth warp at the image edges
+and increasing the central visible image area. Soft border fading is retained.
+This supersedes the center-only protection: the entire camera image now keeps
+its projective proportions. It is a 3D-positioned video backdrop, not a ground
+homography; synthetic lane overlays are approximate and are not pixel-registered
+to the video. Build passed and the replay view was visually verified.
+
+### Soft camera silhouette and view switching
+
+The default view is pure 3D. The Camera toggle switches to a 28% larger,
+softly feathered video backdrop, retaining the accepted camera angle and image
+proportions. A stationary three-finger tap within 650 ms also toggles views;
+Qt touch handling is implemented, but actual comma multitouch remains untested.
+The original ModelRenderer draws calibrated path/lane overlays into camera pixel
+coordinates before the shared video projection, replacing approximate synthetic
+camera-mode lane overlays. This remains a video backdrop, not scene reconstruction.
+
+### Ego-linked camera follow
+
+The hybrid backdrop uses the centered chase view plus the ego vehicle's projected
+screen displacement (compensated for the video's 1.28 enlargement). Thus the
+85 m image plane no longer suppresses lateral motion relative to the nearby
+Niro. Both follow the existing damped lane/camera offset; the calibrated image
+and annotations share exactly the same transform. Pure 3D is unchanged.
+
+### Shared heading and wider silhouette
+
+The video plane now shares the Niro's filtered yaw (`-egoYaw`), pivoting around
+its own center to avoid an exaggerated 85 m lever-arm swing. Original overlays
+rotate with the video. Uniform image enlargement is 1.48 (previously 1.28),
+retaining proportions, with a wider elliptical mask and broader smooth edge
+feathering. Translation compensation uses the same shared scale constant.
+
+### Recorded acceleration and oval camera mask
+
+The demo's first segment contains 6,174 accelerometer and 6,131 gyroscope records
+(approximately 100 Hz). Replay now publishes both. A dedicated nonblocking
+SubMaster consumes acceleration for a visual body-motion approximation: upstream
+locationd's device axis mapping, 3 s baseline removal for gravity/mount offset,
+0.28 s smoothing, roll bounded to 1.2 degrees and pitch to 0.9 degrees.
+Only non-wheel meshes tilt around a body pivot. Camera and wheel positions remain
+stable. Invalid/stale sensors fade motion to neutral; replay rewind resets it.
+This is not measured suspension travel or reconstructed vehicle attitude; gyro
+is available but is not integrated into the effect. Live playback verified over
+100 valid acceleration messages per second. Native build passed.
+The camera mask now uses a flatter ellipse, revealing more side image and less
+sky without changing video aspect ratio.
+
+### Exaggerated motion tuning / steering-driven turn
+
+For visual evaluation, acceleration gains are 4x the initial version, bounded to
+4.5 degrees roll and 3.5 degrees pitch, smoothed over 0.22 s. The visual body yaw
+now follows measured road-wheel angle with a 3.5x display gain and a 10-degree
+limit above 1 m/s. Positive steering means left; draw's Y rotation uses that
+same sign. This is an illustrative turn cue, not an integrated heading estimate.
+It replaces the predicted-path tangent, which could already point back toward
+the destination lane while the maneuver was still progressing. Camera lateral
+follow is tightened from 1.1 s to 0.65 s to reduce the sideways orbit impression.
+
+### Suspension and four-wheel rolling
+
+The extra lateral lane-change offset/orbit is disabled; steering-based visual yaw
+remains. Acceleration drives bounded mass/spring/damper roll, pitch and heave
+(8 rad/s, damping ratio 0.65), with numerical substeps. Body travel is limited to
+6.5 cm; wheels remain on the ground while the body moves around them. This is
+an illustrative suspension driven by acceleration, not measured spring travel.
+All four wheel meshes are separated by connected components using
+`python3 simulator-runtime/native/split_suspension_wheels.py` (requires numpy).
+The generated native/assets/niro-suspension.mesh is independent of device assets.
+Wheel rotation uses individual optional carState wheelSpeeds in m/s and a model
+radius of 0.3285 m; missing all-zero wheel speeds while moving fall back to vEgo.
+Reverse changes the rolling direction. Front wheel steering remains independent.
+The effect also runs in manual/orbit view. Wheels may visually alias at high
+speed because rotation is rendered at the display frame rate.
+`test_suspension.cc` checks settling, frame-rate consistency, bounds and reset.
+
+### Desktop button input
+
+Empty alert overlays are masked to avoid covering the dashboard hit area.
+All three controls route accepted Qt touch events to their respective button.
+Settings use a direct Qt signal connection; C toggles camera and M opens settings.
+A full clean rebuild was required after the menu callback fault. Verified:
+settings button opens native settings, close returns, camera toggles on and C
+returns to 3D, free demo button still works. No physical comma test performed.
+
+### macOS pointer scaling correction
+
+Removed forced QT_SCALE_FACTOR=0.5: it caused inconsistent rendering/hit positions
+across display scale changes. Runtime now uses scale 1. Settings are a normal
+nonmodal window instead of a macOS sheet and have their own Escape shortcut.
+Actual mouse event tracing confirmed QPushButton presses after this change.
+Optional NIRO_TRACE_CLICKS=1 logs input positions only within this app for diagnostics.
+
+### Optional camera suspension experiment
+
+The lower-right “Kamera federt” toggle couples the camera backdrop (including
+its annotations) to the same filtered body roll/pitch about the car's body pivot.
+Heave uses the vehicle anchor's screen displacement to remain perceptible despite
+the distant video plane. Toggle strength eases over 0.4 s; default is off, so the
+stable-camera baseline remains available. This uses acceleration-driven virtual
+suspension, not integrated raw gyro attitude. Test only in the desktop replay.
+
+Camera suspension damping: roll/pitch now use 35% of the body displacement,
+heave 45%, with a separate 0.32 s low-pass response. Vehicle suspension and yaw
+are unchanged. Replay rewind resets the camera filter along with the body.
+
+Camera suspension intermediate tuning: 60% roll/pitch, 65% heave, 0.22 s smoothing.
+
+### Graphite paint and path cleanup
+
+Removed decorative cyan center-path motion strokes; lane markings and the
+predicted path remain. Body paint uses dark neutral graphite with restrained
+clearcoat highlights and subtle derivative-filtered metallic grain. Blue EV
+accents remain; ghost vehicles retain their separate muted appearance.
+Verified by native desktop build and rendered manual-view inspection.
+
+### Reference-inspired automotive finish
+
+The supplied gray Niro photograph is a visual material reference, not a UV
+texture or a calibrated reflectance measurement. Graphite substrate scattering
+and a neutral Fresnel clearcoat now reflect a world-space analytic environment
+(sky gradient, dark horizon, broad cloud and light sources). Reflections follow
+view direction and curved panel normals; fine grain remains object anchored and
+filtered at subpixel scale. This approximates the photo's dark-to-silver panel
+contrast without baking its road/grass/sky into the vehicle. Original hybrid
+mesh geometry and non-paint textures still limit photorealistic matching.
+
+### Subtle camera-view paint reflections
+
+Cooler graphite tint follows the second rear-quarter reference photograph.
+Hybrid mode blends 18% of a soft nine-tap raw NV12 camera sample into the paint
+environment. Reflection coordinates follow surface normal and view direction;
+this is an artistic front-camera colour reflection, not full environment or
+ray-traced reflection. Path annotations and UI are excluded. Strength follows
+the existing camera crossfade, with zero contribution in 3D mode and on ghost
+vehicles. No extra camera readback or framebuffer is required. Native build and
+hybrid rendering checked on desktop; physical comma performance is untested.

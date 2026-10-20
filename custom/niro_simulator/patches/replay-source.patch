@@ -154,10 +154,19 @@ index f950985..6ca2b1b 100644
    return console_ui.exec();
  }
 diff --git a/tools/replay/replay.cc b/tools/replay/replay.cc
-index 7ecad82..db0ba47 100644
+index 7ecad82..0bc94fb 100644
 --- a/tools/replay/replay.cc
 +++ b/tools/replay/replay.cc
-@@ -54,6 +54,7 @@ void Replay::setupSegmentManager(bool has_filters) {
+@@ -2,6 +2,8 @@
+ 
+ #include <capnp/dynamic.h>
+ #include <csignal>
++#include <cerrno>
++#include <cstring>
+ #include "cereal/services.h"
+ #include "common/params.h"
+ #include "tools/replay/util.h"
+@@ -54,6 +56,7 @@ void Replay::setupSegmentManager(bool has_filters) {
      for (size_t i = 0; i < sockets_.size(); ++i) {
        filters[i] = (i == cereal::Event::Which::INIT_DATA || i == cereal::Event::Which::CAR_PARAMS || sockets_[i]);
      }
@@ -165,3 +174,19 @@ index 7ecad82..db0ba47 100644
      seg_mgr_->setFilters(filters);
    }
  }
+@@ -219,7 +222,14 @@ void Replay::publishMessage(const Event *e) {
+     auto bytes = e->data.asBytes();
+     int ret = pm_->send(sockets_[e->which], (capnp::byte *)bytes.begin(), bytes.size());
+     if (ret == -1) {
+-      rWarning("stop publishing %s due to multiple publishers error", sockets_[e->which]);
++      // Seeking interrupts the playback thread with SIGUSR1. A transient
++      // transport interruption must not permanently disable this service.
++      const int error = errno;
++      if (error == EINTR || error == EAGAIN) {
++        rWarning("transient send error for %s: %s; continuing", sockets_[e->which], strerror(error));
++        return;
++      }
++      rWarning("stop publishing %s after send failure: %s", sockets_[e->which], strerror(error));
+       sockets_[e->which] = nullptr;
+     }
+   } else {
