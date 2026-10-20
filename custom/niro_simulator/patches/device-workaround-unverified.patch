@@ -1,0 +1,40 @@
+diff --git a/custom/niro_dashboard/dashboard.cpp b/custom/niro_dashboard/dashboard.cpp
+index e080204..bd3b347 100644
+--- a/custom/niro_dashboard/dashboard.cpp
++++ b/custom/niro_dashboard/dashboard.cpp
+@@ -44,7 +44,7 @@ public:
+  connect(&timer,&QTimer::timeout,this,[this]{QFile h(heartbeat);if(h.open(QIODevice::WriteOnly)){h.write("ok");h.close();}
+   bool ok=requested&&received.elapsed()<300&&bridge.state()==QProcess::Running&&data.value("show").toBool(false);
+   QString status=!ok?"stock":"dashboard";if(status!=lastStatus){lastStatus=status;QFile f("/data/local/niro-dashboard/state");if(f.open(QIODevice::WriteOnly))f.write(status.toUtf8());fprintf(stderr,"VIEW: %s\n",qPrintable(status));fflush(stderr);}
+-  if(!ok){hide();permitted=false;return;}permitted=true;
++  if(!ok){permitted=false;if(frames>0){fprintf(stderr,"VIEW: retiring graphics process for safe handoff\n");fflush(stderr);bridge.kill();bridge.waitForFinished(100);::_exit(42);}return;}permitted=true;
+   {if(!isVisible()){if(frames==0){QFile warm(heartbeat+".warming");if(warm.open(QIODevice::WriteOnly))warm.write("initial graphics load");}landscape(this,true);lastPaint.clear();}auto next=QJsonDocument(data).toJson(QJsonDocument::Compact);if(next!=lastPaint){lastPaint=next;update();}}
+  });timer.start(50);
+  }
+@@ -111,7 +111,7 @@ protected:
+  }
+  void pressAt(QPointF pos){
+   if(!permitted)return;
+-  if(QRectF(1770,30,320,105).contains(pos)){fprintf(stderr,"INPUT: menu\n");fflush(stderr);dragging=false;requested=false;permitted=false;hide();return;}
++  if(QRectF(1770,30,320,105).contains(pos)){fprintf(stderr,"INPUT: menu\n");fflush(stderr);dragging=false;requested=false;permitted=false;bridge.kill();bridge.waitForFinished(100);::_exit(0);}
+   // Camera interaction is limited to parking; this never changes vehicle controls.
+   dragging=data.value("parked").toBool()&&QRectF(500,250,1150,610).contains(pos);dragPoint=pos;
+  }
+diff --git a/custom/niro_dashboard/launch.sh b/custom/niro_dashboard/launch.sh
+index cdae7fa..7d619cb 100755
+--- a/custom/niro_dashboard/launch.sh
++++ b/custom/niro_dashboard/launch.sh
+@@ -8,4 +8,12 @@ export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+ mkdir -p /data/local/niro-dashboard
+ cd "$(dirname "$0")"
+ export PWD="$PWD"
+-exec ./niro-dashboard "$@"
++# Qualcomm Wayland crashes when a previously hidden EGL surface is reused.
++# Exit 42 retires that process; the replacement waits for eligible fresh data.
++set +e
++while :; do
++  ./niro-dashboard "$@"
++  dashboard_status=$?
++  [ "$dashboard_status" -eq 42 ] || exit "$dashboard_status"
++  sleep 0.1
++done

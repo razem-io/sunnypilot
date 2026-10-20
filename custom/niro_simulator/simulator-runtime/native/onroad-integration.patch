@@ -1,0 +1,27 @@
+diff --git a/selfdrive/ui/qt/onroad/onroad_home.cc b/selfdrive/ui/qt/onroad/onroad_home.cc
+index 7db9a05..7a7e302 100644
+--- a/selfdrive/ui/qt/onroad/onroad_home.cc
++++ b/selfdrive/ui/qt/onroad/onroad_home.cc
+@@ -2,6 +2,9 @@
+ 
+ #include <QPainter>
+ #include <QStackedLayout>
++#ifdef NIRO_DESKTOP_ROAD
++#include "road_scene.h"
++#endif
+ 
+ #include "selfdrive/ui/qt/util.h"
+ 
+@@ -18,7 +21,12 @@ OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
+   split = new QHBoxLayout(split_wrapper);
+   split->setContentsMargins(0, 0, 0, 0);
+   split->setSpacing(0);
++  #ifdef NIRO_DESKTOP_ROAD
++  if(qEnvironmentVariableIntValue("NIRO_ROAD_SCENE")){nvg->hide();split->addWidget(new RoadScene(this));}
++  else split->addWidget(nvg);
++#else
+   split->addWidget(nvg);
++#endif
+ 
+   if (getenv("DUAL_CAMERA_VIEW")) {
+     CameraWidget *arCam = new CameraWidget("camerad", VISION_STREAM_ROAD, this);

@@ -1,0 +1,14 @@
+**/__pycache__/
+**/.venv/
+simulator-runtime/source/
+simulator-runtime/libyuv/
+simulator-runtime/build/
+simulator-runtime/native-build/
+simulator-runtime/yuv-build/
+simulator-runtime/cache/
+simulator-runtime/native-params/
+simulator-runtime/native-logs/
+simulator-runtime/native-state
+simulator-runtime/demo-files.json
+simulator-runtime/native/sources.cmake
+*.log

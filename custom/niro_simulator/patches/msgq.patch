@@ -1,0 +1,34 @@
+diff --git a/msgq/impl_zmq.cc b/msgq/impl_zmq.cc
+index e6705e6..888c29e 100644
+--- a/msgq/impl_zmq.cc
++++ b/msgq/impl_zmq.cc
+@@ -19,6 +19,7 @@ static size_t fnv1a_hash(const std::string &str) {
+ 
+ //FIXME: This is a hack to get the port number from the socket name, might have collisions
+ static int get_port(std::string endpoint) {
++    if (endpoint == "pandaStates" && std::getenv("NIRO_REPLAY_PANDA_PORT")) return std::atoi(std::getenv("NIRO_REPLAY_PANDA_PORT"));
+     size_t hash_value = fnv1a_hash(endpoint);
+     int start_port = 8023;
+     int max_port = 65535;
+@@ -117,7 +118,7 @@ int ZMQPubSocket::connect(Context *context, std::string endpoint, bool check_end
+     return -1;
+   }
+ 
+-  full_endpoint = "tcp://*:";
++  full_endpoint = "tcp://127.0.0.1:";
+   if (check_endpoint){
+     full_endpoint += std::to_string(get_port(endpoint));
+   } else {
+diff --git a/msgq/visionipc/visionipc_server.cc b/msgq/visionipc/visionipc_server.cc
+index e4fe89f..6e973a6 100644
+--- a/msgq/visionipc/visionipc_server.cc
++++ b/msgq/visionipc/visionipc_server.cc
+@@ -16,7 +16,7 @@
+ std::string get_endpoint_name(std::string name, VisionStreamType type){
+   if (messaging_use_zmq()){
+     assert(name == "camerad" || name == "navd");
+-    return std::to_string(9000 + static_cast<int>(type));
++    return std::to_string((std::getenv("NIRO_REPLAY_VIPC_PORT") ? std::atoi(std::getenv("NIRO_REPLAY_VIPC_PORT")) : 9000) + static_cast<int>(type));
+   } else {
+     return "visionipc_" + name + "_" + std::to_string(type);
+   }

@@ -1,0 +1,167 @@
+diff --git a/selfdrive/ui/qt/onroad/onroad_home.cc b/selfdrive/ui/qt/onroad/onroad_home.cc
+index 7db9a05..7a7e302 100644
+--- a/selfdrive/ui/qt/onroad/onroad_home.cc
++++ b/selfdrive/ui/qt/onroad/onroad_home.cc
+@@ -2,6 +2,9 @@
+ 
+ #include <QPainter>
+ #include <QStackedLayout>
++#ifdef NIRO_DESKTOP_ROAD
++#include "road_scene.h"
++#endif
+ 
+ #include "selfdrive/ui/qt/util.h"
+ 
+@@ -18,7 +21,12 @@ OnroadWindow::OnroadWindow(QWidget *parent) : QWidget(parent) {
+   split = new QHBoxLayout(split_wrapper);
+   split->setContentsMargins(0, 0, 0, 0);
+   split->setSpacing(0);
++  #ifdef NIRO_DESKTOP_ROAD
++  if(qEnvironmentVariableIntValue("NIRO_ROAD_SCENE")){nvg->hide();split->addWidget(new RoadScene(this));}
++  else split->addWidget(nvg);
++#else
+   split->addWidget(nvg);
++#endif
+ 
+   if (getenv("DUAL_CAMERA_VIEW")) {
+     CameraWidget *arCam = new CameraWidget("camerad", VISION_STREAM_ROAD, this);
+diff --git a/tools/replay/consoleui.cc b/tools/replay/consoleui.cc
+index 185c7d6..567137b 100644
+--- a/tools/replay/consoleui.cc
++++ b/tools/replay/consoleui.cc
+@@ -358,6 +358,9 @@ int ConsoleUI::exec() {
+       break;
+     }
+     handleKey(c);
++    if (loop_end > loop_start && !replay->isPaused() && replay->currentSeconds() >= loop_end) {
++      replay->seekTo(loop_start, false);
++    }
+ 
+     if (rk.frame() % 25) {
+       updateSize();
+diff --git a/tools/replay/consoleui.h b/tools/replay/consoleui.h
+index 7731f80..e9c0c51 100644
+--- a/tools/replay/consoleui.h
++++ b/tools/replay/consoleui.h
+@@ -12,6 +12,7 @@ public:
+   ConsoleUI(Replay *replay);
+   ~ConsoleUI();
+   int exec();
++  void setLoopRange(double start, double end) { loop_start = start; loop_end = end; }
+   inline static const std::array speed_array = {0.2f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+ 
+ private:
+@@ -34,6 +35,7 @@ private:
+   Replay *replay;
+   int max_width, max_height;
+   Status status = Status::Playing;
++  double loop_start = 0, loop_end = -1;
+ 
+   std::mutex mutex;
+   std::vector<std::pair<ReplyMsgType, std::string>> logs;
+diff --git a/tools/replay/logreader.cc b/tools/replay/logreader.cc
+index 75abb84..0979f38 100644
+--- a/tools/replay/logreader.cc
++++ b/tools/replay/logreader.cc
+@@ -74,10 +74,24 @@ bool LogReader::load(const char *data, size_t size, std::atomic<bool> *abort) {
+ }
+ 
+ void LogReader::migrateOldEvents() {
++  std::sort(events.begin(), events.end());
++  cereal::LaneChangeState lane_state=cereal::LaneChangeState::OFF;
++  cereal::LaneChangeDirection lane_direction=cereal::LaneChangeDirection::NONE;
++  uint64_t lane_time=0;
+   size_t events_size = events.size();
+   for (int i = 0; i < events_size; ++i) {
+     // Check if the event is of the old CONTROLS_STATE type
+     auto &event = events[i];
++    // Old routes carried lane-change state in lateralPlan, not modelV2.meta.
++    if(event.which==cereal::Event::LATERAL_PLAN_D_E_P_R_E_C_A_T_E_D){
++      capnp::FlatArrayMessageReader reader(event.data);auto e=reader.getRoot<cereal::Event>();
++      if(e.getValid()){auto plan=e.getLateralPlanDEPRECATED();lane_state=plan.getLaneChangeState();lane_direction=plan.getLaneChangeDirection();lane_time=e.getLogMonoTime();}
++    }else if(event.which==cereal::Event::MODEL_V2 && lane_time && event.mono_time>=lane_time && event.mono_time-lane_time<500000000ULL){
++      capnp::FlatArrayMessageReader reader(event.data);MessageBuilder msg;msg.setRoot(reader.getRoot<cereal::Event>());
++      auto meta=msg.getRoot<cereal::Event>().getModelV2().getMeta();meta.setLaneChangeState(lane_state);meta.setLaneChangeDirection(lane_direction);
++      auto size=msg.getSerializedSize();auto buf=buffer_.allocate(size);msg.serializeToBuffer(reinterpret_cast<unsigned char*>(buf),size);
++      event.data=kj::arrayPtr(reinterpret_cast<const capnp::word*>(buf),size/sizeof(capnp::word));
++    }
+     if (event.which == cereal::Event::CONTROLS_STATE) {
+       // Read the old event data
+       capnp::FlatArrayMessageReader reader(event.data);
+@@ -109,7 +123,7 @@ void LogReader::migrateOldEvents() {
+       msg.serializeToBuffer(reinterpret_cast<unsigned char *>(buf), buf_size);
+ 
+       // Store the migrated event in the events list
+-      auto event_data = kj::arrayPtr(reinterpret_cast<const capnp::word *>(buf), buf_size);
++      auto event_data = kj::arrayPtr(reinterpret_cast<const capnp::word *>(buf), buf_size / sizeof(capnp::word));
+       events.emplace_back(new_evt.which(), new_evt.getLogMonoTime(), event_data);
+     }
+   }
+diff --git a/tools/replay/main.cc b/tools/replay/main.cc
+index f950985..6ca2b1b 100644
+--- a/tools/replay/main.cc
++++ b/tools/replay/main.cc
+@@ -17,6 +17,7 @@ Options:
+   -b, --block        Blacklist of services to send (comma-separated)
+   -c, --cache        Cache <n> segments in memory. Default is 5
+   -s, --start        Start from <seconds>
++      --loop-end     Loop from --start to <seconds>
+   -x, --playback     Playback <speed>
+       --demo         Use a demo route instead of providing your own
+       --auto         Auto load the route from the best available source (no video):
+@@ -43,6 +44,7 @@ struct ReplayConfig {
+   uint32_t flags = REPLAY_FLAG_NONE;
+   bool auto_source = false;
+   int start_seconds = 0;
++  double loop_end = -1;
+   int cache_segments = -1;
+   float playback_speed = -1;
+ };
+@@ -54,6 +56,7 @@ bool parseArgs(int argc, char *argv[], ReplayConfig &config) {
+       {"cache", required_argument, nullptr, 'c'},
+       {"start", required_argument, nullptr, 's'},
+       {"playback", required_argument, nullptr, 'x'},
++      {"loop-end", required_argument, nullptr, 1000},
+       {"demo", no_argument, nullptr, 0},
+       {"auto", no_argument, nullptr, 0},
+       {"data_dir", required_argument, nullptr, 'd'},
+@@ -93,6 +96,7 @@ bool parseArgs(int argc, char *argv[], ReplayConfig &config) {
+       case 'b': config.block = split(optarg, ','); break;
+       case 'c': config.cache_segments = std::atoi(optarg); break;
+       case 's': config.start_seconds = std::atoi(optarg); break;
++      case 1000: config.loop_end = std::atof(optarg); break;
+       case 'x': config.playback_speed = std::atof(optarg); break;
+       case 'd': config.data_dir = optarg; break;
+       case 'p': config.prefix = optarg; break;
+@@ -108,6 +112,11 @@ bool parseArgs(int argc, char *argv[], ReplayConfig &config) {
+     }
+   }
+ 
++  if (config.loop_end >= 0 && config.loop_end <= config.start_seconds) {
++    std::cerr << "--loop-end must be greater than --start\n";
++    return false;
++  }
++
+   // Check for a route name (first positional argument)
+   if (config.route.empty() && optind < argc) {
+     config.route = argv[optind];
+@@ -150,6 +159,7 @@ int main(int argc, char *argv[]) {
+   }
+ 
+   ConsoleUI console_ui(&replay);
++  console_ui.setLoopRange(config.start_seconds, config.loop_end);
+   replay.start(config.start_seconds);
+   return console_ui.exec();
+ }
+diff --git a/tools/replay/replay.cc b/tools/replay/replay.cc
+index 7ecad82..db0ba47 100644
+--- a/tools/replay/replay.cc
++++ b/tools/replay/replay.cc
+@@ -54,6 +54,7 @@ void Replay::setupSegmentManager(bool has_filters) {
+     for (size_t i = 0; i < sockets_.size(); ++i) {
+       filters[i] = (i == cereal::Event::Which::INIT_DATA || i == cereal::Event::Which::CAR_PARAMS || sockets_[i]);
+     }
++    if (filters[cereal::Event::Which::MODEL_V2]) filters[cereal::Event::Which::LATERAL_PLAN_D_E_P_R_E_C_A_T_E_D] = true;
+     seg_mgr_->setFilters(filters);
+   }
+ }
