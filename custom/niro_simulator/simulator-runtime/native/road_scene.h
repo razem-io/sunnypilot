@@ -17,8 +17,14 @@
 #include "lane_motion.h"
 #include "suspension.h"
 #include "road_camera.h"
+#include "solar_light.h"
+#include "ambient_probe.h"
+#include "reflection_history.h"
+#include "cabin_light.h"
+#include <QDateTime>
 #include "selfdrive/ui/qt/widgets/cameraview.h"
 #include <QPainter>
+#include <QPainterPath>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <array>
@@ -36,8 +42,12 @@ class RoadScene : public CameraWidget {
  Curve path,lanes[4],edges[2]; QPushButton *settingsButton=nullptr;
  ModelRenderer cameraModel;std::unique_ptr<QOpenGLTexture> cameraOverlay;uint64_t overlayFrame=0;
  QElapsedTimer touchAge;int touchCount=0;bool touchMoved=false;QMap<int,QPointF> touchOrigins;
+ CabinLight cabin;float cabinLevel=0;
+ ReflectionHistory reflectionHistory;AmbientProbe ambientProbe;GLuint ambientTexture=0;float ambientBlend=0;
  RoadCamera roadCamera;NiroSceneMesh niro; QMatrix4x4 cameraMatrix; float transition=0,orbit=2.32f,elevation=.32f; QPointF pointer; bool dragging=false; QElapsedTimer clock;
  QTimer timer;QElapsedTimer tick,modelAge;uint64_t modelFrame=0;float speed=0,phase=0,dashPhase=0;
+ QPushButton *lightButton=nullptr;int lightMode=0;bool solarValid=false;float lightMix=0,daylight=1;QVector3D sunDirection{-3,5,4},sunTint{1,1,1};
+ SubMaster lightSensors{std::vector<const char*>{"gpsLocationExternal","gpsLocation"}};
  SubMaster motionSensors{std::vector<const char*>{"accelerometer"}};
  QVector3D accelerationBaseline;bool motionInitialized=false;float bodyRoll=0,bodyPitch=0,bodyHeave=0;NiroSpring rollSpring,pitchSpring,heaveSpring;std::array<float,4> wheelSpin{};
  bool valid=false,carValid=false,assistValid=false,engaged=false,lead=false;float leadX=0,leadY=0,leadAlpha=0; qint64 leadSeen=0;int count=0;
@@ -66,6 +76,27 @@ class RoadScene : public CameraWidget {
  }
  void updateModel(){
   auto&s=*uiStateSP();auto&sm=*s.sm;float dt=std::clamp(tick.restart()/1000.f,.001f,.1f);
+  cabinLevel+=(cabin.value()-cabinLevel)*niro_visual::blend(dt,.8f);
+  lightSensors.update(0);
+  niro_solar::Sun sun{45,135};double heading=0;solarValid=false;
+  for(auto service:{"gpsLocationExternal","gpsLocation"}){
+   if(!lightSensors.alive(service)||!lightSensors.valid(service))continue;
+   auto gps=std::string(service)=="gpsLocationExternal"?lightSensors[service].getGpsLocationExternal():lightSensors[service].getGpsLocation();
+   auto utc=QDateTime::fromMSecsSinceEpoch(gps.getUnixTimestampMillis(),Qt::UTC);
+   if(!(gps.getHasFix()||(gps.getFlags()&1))||!utc.isValid()||utc.date().year()<2020||!std::isfinite(gps.getLatitude())||!std::isfinite(gps.getLongitude())||std::abs(gps.getLatitude())>90||std::abs(gps.getLongitude())>180||!std::isfinite(gps.getBearingDeg()))continue;
+   // GPS course is unreliable while stationary: retain the last driving bearing.
+   static double lastHeading=0;if(gps.getSpeed()>1.5)lastHeading=gps.getBearingDeg();heading=lastHeading;
+   auto t=utc.time();sun=niro_solar::position(utc.date().dayOfYear(),utc.date().daysInYear(),t.hour()+t.minute()/60.+t.second()/3600.,gps.getLatitude(),gps.getLongitude());solarValid=true;break;
+  }
+  if(lightMode){sun=lightMode==1?niro_solar::Sun{55,135}:lightMode==2?niro_solar::Sun{3,250}:niro_solar::Sun{-25,0};heading=0;}
+  float lx,ly,lz;niro_solar::direction(sun,heading,lx,ly,lz);
+  float lightAlpha=niro_visual::blend(dt,1.2f);
+  sunDirection+=(QVector3D(lx,ly,lz)-sunDirection)*lightAlpha;
+  daylight+=(float(niro_solar::daylight(sun.elevation))-daylight)*lightAlpha;
+  float warmth=std::clamp(float((15-sun.elevation)/15),0.f,1.f);
+  sunTint+=(QVector3D(1,1-.32f*warmth,1-.57f*warmth)-sunTint)*lightAlpha;
+  lightMix+=(float(lightMode||solarValid)-lightMix)*lightAlpha;
+  lightButton->setText(lightMode==1?"Licht: Tag (Demo)":lightMode==2?"Licht: Abend (Demo)":lightMode==3?"Licht: Nacht (Demo)":solarValid?"Licht: GPS / Sonne":"Licht: Studio · kein GPS");
   motionSensors.update(0);
   float targetRoll=0,targetPitch=0,targetHeave=0;
   if(motionSensors.alive("accelerometer")&&motionSensors.valid("accelerometer")){
@@ -92,6 +123,7 @@ class RoadScene : public CameraWidget {
   cameraPitch+=(bodyPitch*.60f-cameraPitch)*cameraResponse;
   cameraHeave+=(bodyHeave*.65f-cameraHeave)*cameraResponse;
   bool freshCamera=cameraAge.isValid()&&cameraAge.elapsed()<500;
+  ambientBlend+=(float(freshCamera)-ambientBlend)*niro_visual::blend(dt,.5f);
   cameraBlend+=(float(cameraMode&&freshCamera)-cameraBlend)*niro_visual::blend(dt,.55f);
   carValid=sm.alive("carState")&&sm.valid("carState")&&sm["carState"].getCarState().getCanValid();
   speed=carValid?std::max(0.f,sm["carState"].getCarState().getVEgo()):0;
@@ -148,13 +180,15 @@ public:
  void toggleCamera(){cameraButton->toggle();}
  void setSettingsAction(std::function<void()> action){connect(settingsButton,&QPushButton::clicked,this,std::move(action));}
  explicit RoadScene(QWidget*parent=nullptr):CameraWidget("camerad",VISION_STREAM_ROAD,parent){
+ cabin.start();
  connect(this,&CameraWidget::vipcThreadFrameReceived,this,[this]{cameraAge.restart();});
  cameraButton=new QPushButton("Kamera",this);cameraButton->setCheckable(true);cameraButton->setChecked(false);cameraButton->setAccessibleName("Kamerabild einblenden");cameraButton->setToolTip("Zwischen Kamerabild und 3D-Straße wechseln");cameraButton->setStyleSheet("QPushButton{background:transparent;border:none;color:#718b98;font-size:21px;}QPushButton:checked{color:#6cdde8;}");connect(cameraButton,&QPushButton::toggled,this,[this](bool enabled){cameraMode=enabled;});
  demoButton=new QPushButton("Demo: frei drehen",this);demoButton->setCheckable(true);demoButton->setAccessibleName("Demoansicht frei drehen");demoButton->setStyleSheet(cameraButton->styleSheet());
  connect(demoButton,&QPushButton::toggled,this,[this](bool enabled){demoManual=enabled;demoButton->setText(enabled?"Zur Fahransicht":"Demo: frei drehen");if(enabled)cameraButton->setChecked(false);});
+ lightButton=new QPushButton("Licht: Auto",this);lightButton->setAccessibleName("Beleuchtung wechseln: Auto, Tag, Abend, Nacht");lightButton->setStyleSheet(cameraButton->styleSheet());connect(lightButton,&QPushButton::clicked,this,[this]{lightMode=(lightMode+1)%4;});
  motionButton=new QPushButton("Kamera federt",this);motionButton->setCheckable(true);motionButton->setAccessibleName("Kamera mit Federung bewegen");motionButton->setStyleSheet(cameraButton->styleSheet());motionButton->setToolTip("Test: Kamerabild an Karosseriebewegung koppeln");connect(motionButton,&QPushButton::toggled,this,[this](bool on){cameraSuspension=on;});
  setAttribute(Qt::WA_AcceptTouchEvents);cameraButton->setAttribute(Qt::WA_AcceptTouchEvents);cameraButton->installEventFilter(this);
- clock.start();tick.start();connect(&timer,&QTimer::timeout,this,[this]{updateModel();});timer.start(33);settingsButton=new QPushButton(this);settingsButton->setStyleSheet("QPushButton{background:transparent;color:#718b98;border:none;font-size:22px;}");settingsButton->setAccessibleName("Einstellungen");settingsButton->setToolTip("Einstellungen öffnen");QPixmap gearIcon(64,64);gearIcon.fill(Qt::transparent);{QPainter g(&gearIcon);g.setRenderHint(QPainter::Antialiasing);g.setPen(QPen(QColor("#718b98"),7));g.drawEllipse(QPointF(32,32),17,17);g.drawEllipse(QPointF(32,32),6,6);for(int i=0;i<8;i++){g.save();g.translate(32,32);g.rotate(i*45);g.drawLine(QPointF(0,18),QPointF(0,26));g.restore();}}settingsButton->setIcon(QIcon(gearIcon));settingsButton->setIconSize(QSize(44,44));for(auto *b:{demoButton,settingsButton,motionButton}){b->setAttribute(Qt::WA_AcceptTouchEvents);b->installEventFilter(this);}}
+ clock.start();tick.start();connect(&timer,&QTimer::timeout,this,[this]{updateModel();});timer.start(33);settingsButton=new QPushButton(this);settingsButton->setStyleSheet("QPushButton{background:transparent;color:#718b98;border:none;font-size:22px;}");settingsButton->setAccessibleName("Einstellungen");settingsButton->setToolTip("Einstellungen öffnen");QPixmap gearIcon(64,64);gearIcon.fill(Qt::transparent);{QPainter g(&gearIcon);g.setRenderHint(QPainter::Antialiasing);g.setPen(QPen(QColor("#718b98"),7));g.drawEllipse(QPointF(32,32),17,17);g.drawEllipse(QPointF(32,32),6,6);for(int i=0;i<8;i++){g.save();g.translate(32,32);g.rotate(i*45);g.drawLine(QPointF(0,18),QPointF(0,26));g.restore();}}settingsButton->setIcon(QIcon(gearIcon));settingsButton->setIconSize(QSize(44,44));for(auto *b:{demoButton,settingsButton,motionButton,lightButton}){b->setAttribute(Qt::WA_AcceptTouchEvents);b->installEventFilter(this);}}
 protected:
  bool handleTouch(QEvent *event,QPushButton *button=nullptr){
   if(event->type()!=QEvent::TouchBegin&&event->type()!=QEvent::TouchUpdate&&event->type()!=QEvent::TouchEnd&&event->type()!=QEvent::TouchCancel)return false;
@@ -181,8 +215,8 @@ protected:
   float x=std::max(cameraAspect/aspect,1.f),y=std::max(aspect/cameraAspect,1.f);
   return mat4{{x,0,0,0, 0,y,0,0, 0,0,1,0, 0,0,0,1}};
  }
- void resizeEvent(QResizeEvent*e)override{QOpenGLWidget::resizeEvent(e);if(motionButton)motionButton->setGeometry(1760*width()/2160,975*height()/1080,330*width()/2160,75*height()/1080);if(demoButton)demoButton->setGeometry(1240*width()/2160,35*height()/1080,270*width()/2160,85*height()/1080);if(cameraButton)cameraButton->setGeometry(1510*width()/2160,35*height()/1080,180*width()/2160,85*height()/1080);cameraVeil=QImage();if(settingsButton)settingsButton->setGeometry(2010*width()/2160,35*height()/1080,85*width()/2160,85*height()/1080);}
- void initializeGL()override{CameraWidget::initializeGL();niro.initialize();roadCamera.initialize();}
+ void resizeEvent(QResizeEvent*e)override{QOpenGLWidget::resizeEvent(e);if(lightButton)lightButton->setGeometry(1320*width()/2160,975*height()/1080,420*width()/2160,75*height()/1080);if(motionButton)motionButton->setGeometry(1760*width()/2160,975*height()/1080,330*width()/2160,75*height()/1080);if(demoButton)demoButton->setGeometry(1240*width()/2160,35*height()/1080,270*width()/2160,85*height()/1080);if(cameraButton)cameraButton->setGeometry(1510*width()/2160,35*height()/1080,180*width()/2160,85*height()/1080);cameraVeil=QImage();if(settingsButton)settingsButton->setGeometry(2010*width()/2160,35*height()/1080,85*width()/2160,85*height()/1080);}
+ void initializeGL()override{CameraWidget::initializeGL();niro.initialize();roadCamera.initialize();ambientProbe.initialize();reflectionHistory.initialize();}
  void mousePressEvent(QMouseEvent*e)override{pointer=e->localPos();dragging=(!engaged||demoManual)&&QRectF(width()*.23,height()*.16,width()*.54,height()*.68).contains(pointer);}
  void mouseMoveEvent(QMouseEvent*e)override{if(dragging&&(!engaged||demoManual)){orbit+=(e->localPos().x()-pointer.x())*.005f;elevation=std::clamp(float(elevation+(e->localPos().y()-pointer.y())*.004f),.1f,1.48f);pointer=e->localPos();update();}}
  void mouseReleaseEvent(QMouseEvent*)override{dragging=false;}
@@ -193,7 +227,9 @@ protected:
   target=target*(1-hybrid)+QVector3D(-12.f,.8f,0)*hybrid;
   eye.setZ(eye.z()-cameraOffset);target.setZ(target.z()-cameraOffset);QMatrix4x4 view,projection;view.lookAt(eye,target,{0,1,0});projection.perspective(34+14*transition-6*hybrid,sceneRect().width()/sceneRect().height(),.1,220);projection(1,2)=-.08f*hybrid;cameraMatrix=projection*view;
 
-  if(cameraBlend>.001f){glDisable(GL_DEPTH_TEST);glDisable(GL_SCISSOR_TEST);glDisable(GL_BLEND);CameraWidget::paintGL();}
+  if(cameraAge.isValid()&&cameraAge.elapsed()<500){glDisable(GL_DEPTH_TEST);glDisable(GL_SCISSOR_TEST);glDisable(GL_BLEND);CameraWidget::paintGL();}
+  ambientTexture=ambientProbe.update(textures[0],textures[1],prev_frame_id,cameraAge.isValid()&&cameraAge.elapsed()<500&&stream_width>0&&stream_height>0);
+  reflectionHistory.update(textures[0],textures[1],prev_frame_id,ambientTexture!=0,speed);
   QPainter p(this);p.setRenderHint(QPainter::Antialiasing);QLinearGradient bg(0,0,0,height());bg.setColorAt(0,QColor("#17232e"));bg.setColorAt(.3,QColor("#243440"));bg.setColorAt(1,QColor("#0a1018"));p.fillRect(rect(),bg);
   if(cameraBlend>.001f&&stream_width>0&&stream_height>0){
    p.end();auto &state=*uiStateSP();auto calibration=state.sm->operator[]("liveCalibration").getLiveCalibration();
@@ -262,10 +298,57 @@ protected:
    p.setOpacity(1);
   }
 
+  // Direction diagnostic: silhouette projected onto the road plane by the
+  // exact same light vector used for the car (never by the orbit camera).
+  QMatrix4x4 shadowFrame;shadowFrame.rotate(-egoYaw,0,1,0);
+  QVector3D shadowLight=shadowFrame.mapVector(sunDirection).normalized();
+  if(lightMix>.01f&&daylight>.01f&&shadowLight.y()>.04f){
+   QMatrix4x4 body;body.translate(2.2f*cameraBlend,.5f+bodyHeave,0);
+   body.rotate(-egoYaw,0,1,0);body.rotate(bodyRoll,1,0,0);body.rotate(bodyPitch,0,0,1);body.translate(0,-.5f,0);
+   std::vector<QPointF> ground;
+   for(float y:{.08f,1.15f,1.55f})for(float x:{-2.15f,2.05f})for(float z:{-.86f,.86f}){
+    // Roof is inset from the bumper footprint; diagnostic hull, not shadow map.
+    QVector3D w=body.map(QVector3D(y>1.5f?x*.60f:x,y,y>1.5f?z*.82f:z));
+    float travel=std::min(w.y()/shadowLight.y(),12.f);
+    ground.emplace_back(w.x()-shadowLight.x()*travel,w.z()-shadowLight.z()*travel);
+   }
+   // Cache a feathered mask once. Two textured quads replace 56 blended
+   // vector paths and thousands of projections on every frame.
+   static const QImage mask=[] {
+    QImage im(256,256,QImage::Format_ARGB32_Premultiplied);im.fill(Qt::transparent);
+    for(int y=0;y<256;y++)for(int x=0;x<256;x++){
+     float u=(x-127.5f)/127.5f,v=(y-127.5f)/127.5f;
+     float r=std::pow(std::pow(u,4)+std::pow(v,4),.25f);
+     float t=std::clamp((r-.28f)/.72f,0.f,1.f),a=.72f*(1-t*t*(3-2*t));
+     im.setPixel(x,y,qRgba(0,0,0,int(255*a)));
+    }return im;
+   }();
+   auto inverse=shadowFrame.inverted();float minX=1e6,maxX=-1e6,minZ=1e6,maxZ=-1e6;
+   for(auto q:ground){auto v=inverse.mapVector(QVector3D(q.x(),0,q.y()));minX=std::min(minX,v.x());maxX=std::max(maxX,v.x());minZ=std::min(minZ,v.z());maxZ=std::max(maxZ,v.z());}
+   auto drawMask=[&](float cx,float cz,float rx,float rz,float opacity){
+    QPolygonF screen;for(auto c:{QPointF(-1,-1),QPointF(1,-1),QPointF(1,1),QPointF(-1,1)}){
+     auto v=shadowFrame.mapVector(QVector3D(cx+c.x()*rx,0,cz+c.y()*rz));screen<<project(-v.x(),-v.z(),.012f);
+    }
+    QPolygonF source;source<<QPointF(0,0)<<QPointF(256,0)<<QPointF(256,256)<<QPointF(0,256);
+    QTransform transform;if(!QTransform::quadToQuad(source,screen,transform))return;
+    p.save();p.setOpacity(opacity);p.setRenderHint(QPainter::SmoothPixmapTransform);p.setWorldTransform(transform,true);p.drawImage(QPointF(0,0),mask);p.restore();
+   };
+   drawMask((minX+maxX)*.5f,(minZ+maxZ)*.5f,(maxX-minX)*.67f,(maxZ-minZ)*.67f,.85f*lightMix*daylight);
+   auto contact=inverse.mapVector(QVector3D(2.2f*cameraBlend,0,0));
+   drawMask(contact.x(),contact.z(),2.4f,1.05f,.60f*lightMix*daylight);
+  }
   p.restore();p.end();
   auto vp=sceneRect();float pixel=devicePixelRatioF();
   float wheel=carValid?smCarWheel():0;
-  niro.setCameraReflection(textures[0],textures[1],stream_width>0&&stream_height>0?cameraBlend:0.f);
+  // sunDirection is already relative to the measured GPS vehicle course.
+  // Apply the SAME presentation yaw as the car; do not count steering twice.
+  // Orbit/view rotation is deliberately absent from this transform.
+  QMatrix4x4 lightFrame;lightFrame.rotate(-egoYaw,0,1,0);
+  niro.setSunLight(lightFrame.mapVector(sunDirection).normalized(),sunTint,daylight,lightMix);
+  niro.setCameraReflection(ambientTexture,ambientBlend);
+  niro.setCameraPanorama(textures[0],textures[1],cameraAge.isValid()&&cameraAge.elapsed()<500&&stream_width>0&&stream_height>0);
+  niro.setReflectionHistory(reflectionHistory.older,reflectionHistory.newer,reflectionHistory.blend);
+  niro.setCabinLight(cabinLevel);
   niro.draw(cameraMatrix,eye,wheel,width()*devicePixelRatioF(),height()*devicePixelRatioF(),QVector3D(2.2f*cameraBlend,0,-laneOffset),-egoYaw,true,1,QRect(vp.left()*pixel,(height()-vp.bottom())*pixel,vp.width()*pixel,vp.height()*pixel),false,bodyRoll,bodyPitch,bodyHeave,wheelSpin);
   if(valid&&lead&&transition>.01&&cameraBlend<.999f){float y=pathAt(leadX)+leadY;float heading=std::atan2(pathAt(leadX+2)-pathAt(leadX-2),4.f)*180/M_PI;niro.draw(cameraMatrix,eye,0,width()*devicePixelRatioF(),height()*devicePixelRatioF(),QVector3D(-leadX,0,-y-laneOffset),-heading,false,.62f*transition*leadAlpha*(1-cameraBlend),QRect(vp.left()*pixel,(height()-vp.bottom())*pixel,vp.width()*pixel,vp.height()*pixel),true);}
   p.begin(this);p.setRenderHint(QPainter::Antialiasing);

@@ -296,3 +296,112 @@ ray-traced reflection. Path annotations and UI are excluded. Strength follows
 the existing camera crossfade, with zero contribution in 3D mode and on ghost
 vehicles. No extra camera readback or framebuffer is required. Native build and
 hybrid rendering checked on desktop; physical comma performance is untested.
+
+### GPS solar-light experiment
+
+Auto lighting subscribes to gpsLocationExternal/gpsLocation and uses recorded
+UTC timestamp, latitude, longitude and driving course. Sun elevation/azimuth
+use the NOAA fractional-year approximation (solar_light.h). Mesh coordinates
+are front -X, up +Y, left +Z; GPS course rotates the light into vehicle axes.
+At speeds <=1.5 m/s the last course is held. Lighting transitions over 1.2 s.
+Missing/invalid GPS falls back to labelled studio lighting. Replay now permits
+both GPS services. No location is sent to a server.
+The bottom Light button cycles Auto / Day demo / Evening demo / Night demo.
+Night uses dim presentation fill, not an astronomical moon model. Camera
+pixels and UI brightness are unchanged. Cloud cover, building shadows, moon
+phase/position, and lamp emissive materials are not modeled. Desktop only.
+Validated test_solar_light.cc (equinox noon/night, seasons, longitude and vehicle
+heading axes), native build, live replay GPS mode, evening and night rendering.
+NOAA source: https://gml.noaa.gov/grad/solcalc/solareqns.PDF
+
+### Dynamic sun reflections and camera ambient fill
+
+Auto sun mode replaces fixed studio light-card highlights with a broader
+sun-direction reflection lobe. Transformed body normals include suspension
+roll/pitch, so highlights respond to body motion and GPS-relative heading.
+Camera illumination now runs in both 3D and hybrid views while fresh frames
+arrive. AmbientProbe downsamples raw NV12 to a 32x16 linear RGB16F ping-pong
+texture, spatially filters 25 taps, and smooths new frames with tau=0.35 s.
+History resets on frame rewind, long gap or stale feed. No CPU pixel readback.
+Separate left/right/top/bottom samples illuminate corresponding surface normals;
+a view-dependent sample adds metallic reflection. Contributions are independent
+of solar day strength so artificial light can brighten night mode. UI/path
+annotations are excluded. Missing feed disables camera illumination.
+Camera exposure makes this an artistic ambient effect, not physical illuminance
+or a complete surrounding environment. Buildings/tunnels do not currently
+occlude the computed sun. Native build and daylight replay rendering verified;
+night tunnel footage and physical comma GPU load remain untested.
+
+### Exaggerated solar reflection comparison
+
+Auto-mode synthetic environment is reduced to 12%; the directional solar
+reflection gains 7x intensity with an exponent of 80 to keep a localized spot.
+Dark upper surfaces (glass heuristic) use the same reflection-vector solar
+source with gain 2.5 instead of the previous separate half-vector highlight.
+This is intentionally exaggerated tuning for comparison, not physical material
+calibration. No artificial light orbit or exaggerated GPS heading is added.
+
+### Separate scene illumination from camera-dependent glints
+
+GPS-relative solar direction is transformed by the same presentation yaw as
+the ego mesh before drawing. This prevents the steering presentation from
+being counted twice. Neither orbit angle nor view matrix affects this source.
+Directional diffuse lighting now dominates; the extreme glass glint experiment
+is reduced back to gain 0.2 and solar environment gain 1.2. Reflections remain
+view dependent as expected for specular surfaces, while N dot L illumination
+is independent of camera orbit. Camera ambient fill remains separate.
+Observed live GPS course variation (~323 to 326 degrees over three seconds);
+small road bends naturally produce small changes in the solar direction.
+
+### Shared directional shadow and front-hemisphere glints
+
+Orient visible double-sided normals toward the viewer; solar specular requires
+N dot L > 0 so back-hemisphere light cannot create a glint. Solar glint exponent
+is 160. Reduced substrate diffuse .75 -> .32, camera diffuse 1.8 -> .65 and
+camera reflection .9 -> .35 to restore dark graphite under combined sources.
+A diagnostic convex silhouette (body/roof bounds) is projected onto y=0 using
+the exact scene solar vector and body pose. It is camera-independent, drawn
+after the road and before the mesh. Below 0.04 light elevation component it
+is hidden, and ray travel is capped at 12 m. This is a coarse planar shadow,
+not mesh self-shadowing or camera-image depth reconstruction.
+Build and replay rendering verified; 12 azimuth ground-intersection checks pass.
+A high sun can legitimately reflect on different tilted panes from different
+viewpoints; the shared ground shadow is the directional reference.
+
+### Soft ground shadow
+
+Replaced the diagnostic opaque hull with 32 rounded low-opacity layers,
+expanding its outer footprint to 138% and feathering inward in road coordinates.
+A separate 24-layer elliptical contact shade anchors the body near the tyres.
+Both use the existing sunlight strength and pose; no lighting/material changes.
+The footprint remains an approximation, not a mesh shadow map.
+
+### Cached shadow masks
+
+Replaced 56 layered paths with two projectively mapped 256x256 cached feathered
+masks (directional and contact). The mask is generated once, with a rounded
+superellipse and smooth alpha falloff. Directional opacity .85, contact .60,
+mask peak alpha .72. World-plane bounding extents retain direction and size.
+This removes per-frame curve tessellation and most shadow projections; actual
+frame-rate improvement is not yet benchmarked.
+
+### Cabin ambient experiment
+Replay enables `--dcam` and publishes driver camera frames. `CabinLight` samples fewer than 768 luma pixels at at most 10 Hz on a separate thread; only one scalar survives processing. No driver picture is drawn or saved by this feature. Upper dark glazing (material 2) receives neutral, restrained fill smoothed over 0.8 s. Missing frames expire after 750 ms and fade to a dim baseline. This is an artistic luma cue, not lux or visible-colour measurement: IR and camera auto exposure affect it. Glass remains opaque; the model has no clearly labelled interior and transparent rendering has not been validated. Additional driver-video decoding has a performance cost even though the reduction is tiny.
+
+### Transparent glazing trial
+Cabin emission is disabled. Dark upper panes of material 2 now render after opaque geometry, with back/front face passes and depth writes disabled. Alpha ranges from 0.18 face-on to 0.48 at grazing angles. The running rear view exposes seat/headrest-like interior geometry behind the glass. This is a transparency experiment, not refraction or fully sorted per-triangle glass. Automatic IR-triggered tinting is not implemented; camera luma is not used to infer IR.
+
+### Cabin upholstery lighting
+Driver-camera luma now adds a smoothed neutral diffuse fill to dark interior surfaces only (non-paint, non-glass, spatially inset passenger-compartment mask). A low reflectance floor makes black upholstery readable. Glazing alpha is reduced to 0.13–0.40. Glass emission remains disabled. The interior mask is an approximation because the model has shared, unnamed atlases; automatic IR detection remains unavailable.
+
+### Exaggerated 180° road-video reflection trial
+The full NV12 road-camera textures are sampled by the reflected view vector on paint and glazing, stretched equirectangularly over a forward 180° hemisphere. The frame follows vehicle heading and is independent of orbit camera; body pitch/roll enter through surface normals. Edge coverage fades from 75° to 90°, leaving the unseen rear hemisphere to the existing environment. Gain 2.8 is intentionally exaggerated. This is an artistic camera projection, not a measured HDR panorama; the source field of view is stretched and exposure, parallax and missing surroundings remain approximations. Stale video (>500 ms) disables this layer. No extra video decode, CPU readback or capture.
+
+### Full-surround reflection trial
+The rear hemisphere now blends distance-indexed front-camera history (12 m travel delay), reversing the horizontal sweep. A 32-frame GPU-only ring at 512×256 RGBA8 uses 16 MiB and captures at most 10 Hz after at least 0.25 m travel. Adjacent history samples are interpolated. At startup or beyond retained history the oldest available sample is used; stationary travel holds the rear material. Rewind/stale frames reset history. The front/rear join blends over ~66–115°. This is deliberately exaggerated artistic continuity, not rear-view reconstruction: no depth, occluded surfaces, historical heading compensation or moving-object correction is available. Raw road frames are not written to disk.
+
+### Restrained graphite reflection tuning
+After the exaggerated surround trial, paint panorama gain is reduced from 2.8 to 0.35 (87.5% less contribution). Glazing gain is reduced to 0.55 while preserving transparency and cabin fill. The existing graphite substrate, world sun, distance history and moving panorama mapping are unchanged.
+
+### Darker graphite balance
+Paint tint is now (0.135, 0.15, 0.17), with the metallic substrate tint floor reduced from 0.20 to 0.13. Panorama gain increases slightly from 0.35 to 0.44; glazing stays at 0.55. This keeps a darker underlying finish with more distinct moving clearcoat reflections.
