@@ -83,6 +83,12 @@ function launch {
   if [ ! -f $DIR/prebuilt ]; then
     ./build.py
   fi
+  # Apply the release from the final selected checkout, after overlay swap/build.
+  # A failed integrity check stops startup; it must never launch the old UI.
+  if ! /usr/local/venv/bin/python "$DIR/custom/niro_device/install.py"; then
+    echo "Niro branch release installation failed; no older UI will be launched" >&2
+    exit 1
+  fi
   ./manager.py
 
   # if broken, keep on screen error
