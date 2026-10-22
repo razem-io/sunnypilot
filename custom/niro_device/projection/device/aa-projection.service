@@ -1,0 +1,20 @@
+[Unit]
+Description=Automatic USB Android Auto dashboard projection
+After=local-fs.target
+RequiresMountsFor=/data /sys/kernel/config
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/data/openpilot/custom/niro_device/projection
+ExecStart=/bin/bash /data/openpilot/custom/niro_device/projection/device/usb-autoconnect.sh
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=12
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aa-projection
+
+[Install]
+WantedBy=multi-user.target

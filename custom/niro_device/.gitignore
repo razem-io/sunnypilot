@@ -1,0 +1,5 @@
+.build/
+__pycache__/
+projection/.runtime
+projection/qcom-encoder-probe
+projection/autoconnect.enabled

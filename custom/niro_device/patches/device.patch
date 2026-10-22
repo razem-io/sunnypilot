@@ -1,0 +1,304 @@
+--- a/common/util.cc
++++ b/common/util.cc
+@@ -303,7 +303,7 @@
+ 
+ bool system_time_valid() {
+   // Default to August 26, 2024
+-  tm min_tm = {.tm_year = 2024 - 1900, .tm_mon = 7, .tm_mday = 26};
++  tm min_tm = {}; min_tm.tm_year = 2024 - 1900; min_tm.tm_mon = 7; min_tm.tm_mday = 26;
+   time_t min_date = mktime(&min_tm);
+ 
+   struct stat st;
+--- a/selfdrive/ui/qt/home.cc
++++ b/selfdrive/ui/qt/home.cc
+@@ -1,6 +1,8 @@
+ #include "selfdrive/ui/qt/home.h"
+ 
+ #include <QHBoxLayout>
++#include "road_scene.h"
++#include "dashboard_alerts.h"
+ #include <QMouseEvent>
+ 
+ #include "selfdrive/ui/qt/util.h"
+@@ -34,6 +36,17 @@
+     showDriverView(false);
+   });
+   slayout->addWidget(driver_view);
++  niroHome = new QWidget(this);
++  auto layers = new QStackedLayout(niroHome);
++  layers->setContentsMargins(0,0,0,0);
++  layers->setStackingMode(QStackedLayout::StackAll);
++  auto niro = new RoadScene(niroHome);
++  niro->setSettingsAction([this]{emit openSettings();});
++  layers->addWidget(niro);
++  auto alerts = new NiroDashboardAlerts(niroHome);
++  layers->addWidget(alerts); alerts->raise();
++  connect(uiStateSP(), &UIState::uiUpdate, alerts, [alerts](const UIState &s){alerts->syncState(s);});
++  slayout->addWidget(niroHome);slayout->setCurrentWidget(niroHome);sidebar->hide();
+   setAttribute(Qt::WA_NoSystemBackground);
+   QObject::connect(uiState(), &UIState::uiUpdate, this, &HomeWindow::updateState);
+   QObject::connect(uiState(), &UIState::offroadTransition, this, &HomeWindow::offroadTransition);
+@@ -41,7 +54,7 @@
+ }
+ 
+ void HomeWindow::showSidebar(bool show) {
+-  sidebar->setVisible(show);
++  sidebar->hide();
+ }
+ 
+ void HomeWindow::updateState(const UIState &s) {
+@@ -56,11 +69,11 @@
+ 
+ void HomeWindow::offroadTransition(bool offroad) {
+   body->setEnabled(false);
+-  sidebar->setVisible(offroad);
++  sidebar->hide();
+   if (offroad) {
+-    slayout->setCurrentWidget(home);
++    slayout->setCurrentWidget(niroHome);
+   } else {
+-    slayout->setCurrentWidget(onroad);
++    slayout->setCurrentWidget(niroHome);
+   }
+ }
+ 
+@@ -69,9 +82,9 @@
+     emit closeSettings();
+     slayout->setCurrentWidget(driver_view);
+   } else {
+-    slayout->setCurrentWidget(home);
++    slayout->setCurrentWidget(niroHome);
+   }
+-  sidebar->setVisible(show == false);
++  sidebar->hide();
+ }
+ 
+ void HomeWindow::mousePressEvent(QMouseEvent* e) {
+@@ -88,7 +101,7 @@
+     if (onroad->isVisible()) {
+       slayout->setCurrentWidget(body);
+     } else if (body->isVisible()) {
+-      slayout->setCurrentWidget(onroad);
++      slayout->setCurrentWidget(niroHome);
+     }
+     showSidebar(false);
+   }
+--- a/selfdrive/ui/qt/home.h
++++ b/selfdrive/ui/qt/home.h
+@@ -48,6 +48,7 @@
+   void mousePressEvent(QMouseEvent* e) override;
+   void mouseDoubleClickEvent(QMouseEvent* e) override;
+ 
++  QWidget *niroHome;
+   Sidebar *sidebar;
+   OffroadHome *home;
+   OnroadWindow *onroad;
+--- a/selfdrive/ui/qt/onroad/onroad_home.cc
++++ b/selfdrive/ui/qt/onroad/onroad_home.cc
+@@ -2,6 +2,9 @@
+ 
+ #include <QPainter>
+ #include <QStackedLayout>
++#ifdef NIRO_DESKTOP_ROAD
++#include "road_scene.h"
++#endif
+ 
+ #include "selfdrive/ui/qt/util.h"
+ 
+@@ -18,7 +21,12 @@
+   split = new QHBoxLayout(split_wrapper);
+   split->setContentsMargins(0, 0, 0, 0);
+   split->setSpacing(0);
++  #ifdef NIRO_DESKTOP_ROAD
++  if(qEnvironmentVariableIntValue("NIRO_ROAD_SCENE")){nvg->hide();split->addWidget(new RoadScene(this));}
++  else split->addWidget(nvg);
++#else
+   split->addWidget(nvg);
++#endif
+ 
+   if (getenv("DUAL_CAMERA_VIEW")) {
+     CameraWidget *arCam = new CameraWidget("camerad", VISION_STREAM_ROAD, this);
+--- a/selfdrive/ui/qt/util.cc
++++ b/selfdrive/ui/qt/util.cc
+@@ -92,7 +92,7 @@
+ #else
+   fmt.setRenderableType(QSurfaceFormat::OpenGLES);
+ #endif
+-  fmt.setSamples(16);
++  fmt.setSamples(2);
+   fmt.setStencilBufferSize(1);
+   QSurfaceFormat::setDefaultFormat(fmt);
+ }
+--- a/selfdrive/ui/qt/widgets/cameraview.cc
++++ b/selfdrive/ui/qt/widgets/cameraview.cc
+@@ -27,7 +27,7 @@
+   "}\n";
+ 
+ const char frame_fragment_shader[] =
+-#ifdef QCOM2
++#if defined(QCOM2) && !defined(NIRO_NV12_UPLOAD)
+   "#version 300 es\n"
+   "#extension GL_OES_EGL_image_external_essl3 : enable\n"
+   "precision mediump float;\n"
+@@ -79,7 +79,7 @@
+     glDeleteVertexArrays(1, &frame_vao);
+     glDeleteBuffers(1, &frame_vbo);
+     glDeleteBuffers(1, &frame_ibo);
+-#ifndef QCOM2
++#if !defined(QCOM2) || defined(NIRO_NV12_UPLOAD)
+     glDeleteTextures(2, textures);
+ #endif
+   }
+@@ -137,7 +137,7 @@
+ 
+   glUseProgram(program->programId());
+ 
+-#ifdef QCOM2
++#if defined(QCOM2) && !defined(NIRO_NV12_UPLOAD)
+   glUniform1i(program->uniformLocation("uTexture"), 0);
+ #else
+   glGenTextures(2, textures);
+@@ -165,7 +165,7 @@
+     vipc_thread = nullptr;
+   }
+ 
+-#ifdef QCOM2
++#if defined(QCOM2) && !defined(NIRO_NV12_UPLOAD)
+   EGLDisplay egl_display = eglGetCurrentDisplay();
+   assert(egl_display != EGL_NO_DISPLAY);
+   for (auto &pair : egl_images) {
+@@ -196,9 +196,15 @@
+ }
+ 
+ void CameraWidget::paintGL() {
++  prepareCameraFrame(true);
++}
++
++void CameraWidget::prepareCameraFrame(bool draw) {
++  if (draw) {
+   glClearColor(bg.redF(), bg.greenF(), bg.blueF(), bg.alphaF());
+   glClear(GL_STENCIL_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+ 
++  }
+   std::lock_guard lk(frame_lock);
+   if (frames.empty()) return;
+ 
+@@ -209,16 +215,13 @@
+   //   if (frames[frame_idx].first == draw_frame_id) break;
+   // }
+ 
+-  // Log duplicate/dropped frames
+-  if (frames[frame_idx].first == prev_frame_id) {
+-    qDebug() << "Drawing same frame twice" << frames[frame_idx].first;
+-  } else if (frames[frame_idx].first != prev_frame_id + 1) {
+-    qDebug() << "Skipped frame" << frames[frame_idx].first;
+-  }
++  const bool upload = !cameraTextureReady || frames[frame_idx].first != prev_frame_id;
++
+   prev_frame_id = frames[frame_idx].first;
+   VisionBuf *frame = frames[frame_idx].second;
+   assert(frame != nullptr);
+ 
++  if (!draw && !upload) return;
+   auto frame_mat = calcFrameMatrix();
+ 
+   glViewport(0, 0, glWidth(), glHeight());
+@@ -226,13 +229,14 @@
+   glUseProgram(program->programId());
+   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+ 
+-#ifdef QCOM2
++#if defined(QCOM2) && !defined(NIRO_NV12_UPLOAD)
+   // no frame copy
+   glActiveTexture(GL_TEXTURE0);
+   glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, egl_images[frame->idx]);
+   assert(glGetError() == GL_NO_ERROR);
+ #else
+-  // fallback to copy
++  // Upload a camera frame once, even when the scene animates more frequently.
++  if (upload) {
+   glPixelStorei(GL_UNPACK_ROW_LENGTH, stream_stride);
+   glActiveTexture(GL_TEXTURE0);
+   glBindTexture(GL_TEXTURE_2D, textures[0]);
+@@ -244,12 +248,20 @@
+   glBindTexture(GL_TEXTURE_2D, textures[1]);
+   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, stream_width/2, stream_height/2, GL_RG, GL_UNSIGNED_BYTE, frame->uv);
+   assert(glGetError() == GL_NO_ERROR);
+-#endif
+-
++  }
++#endif
++
++  cameraTextureReady = true;
++  if (draw) {
++#if !defined(QCOM2) || defined(NIRO_NV12_UPLOAD)
++  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, textures[0]);
++  glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, textures[1]);
++#endif
+   glUniformMatrix4fv(program->uniformLocation("uTransform"), 1, GL_TRUE, frame_mat.v);
+   glEnableVertexAttribArray(0);
+   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (const void *)0);
+   glDisableVertexAttribArray(0);
++  }
+   glBindVertexArray(0);
+   glBindTexture(GL_TEXTURE_2D, 0);
+   glActiveTexture(GL_TEXTURE0);
+@@ -259,11 +271,12 @@
+ 
+ void CameraWidget::vipcConnected(VisionIpcClient *vipc_client) {
+   makeCurrent();
++  cameraTextureReady = false;
+   stream_width = vipc_client->buffers[0].width;
+   stream_height = vipc_client->buffers[0].height;
+   stream_stride = vipc_client->buffers[0].stride;
+ 
+-#ifdef QCOM2
++#if defined(QCOM2) && !defined(NIRO_NV12_UPLOAD)
+   EGLDisplay egl_display = eglGetCurrentDisplay();
+   assert(egl_display != EGL_NO_DISPLAY);
+   for (auto &pair : egl_images) {
+--- a/selfdrive/ui/qt/widgets/cameraview.h
++++ b/selfdrive/ui/qt/widgets/cameraview.h
+@@ -13,7 +13,7 @@
+ #include <QOpenGLWidget>
+ #include <QThread>
+ 
+-#ifdef QCOM2
++#if defined(QCOM2) && !defined(NIRO_NV12_UPLOAD)
+ #define EGL_EGLEXT_PROTOTYPES
+ #define EGL_NO_X11
+ #define GL_TEXTURE_EXTERNAL_OES 0x8D65
+@@ -53,6 +53,8 @@
+ 
+ protected:
+   void paintGL() override;
++  void prepareCameraFrame(bool draw);
++  bool cameraTextureReady = false;
+   void initializeGL() override;
+   void showEvent(QShowEvent *event) override;
+   void mouseReleaseEvent(QMouseEvent *event) override { emit clicked(); }
+@@ -68,7 +70,7 @@
+   std::unique_ptr<QOpenGLShaderProgram> program;
+   QColor bg = QColor("#000000");
+ 
+-#ifdef QCOM2
++#if defined(QCOM2) && !defined(NIRO_NV12_UPLOAD)
+   std::map<int, EGLImageKHR> egl_images;
+ #endif
+ 
+--- a/selfdrive/ui/ui.cc
++++ b/selfdrive/ui/ui.cc
+@@ -1,3 +1,4 @@
++extern bool niroDisplayDark;
+ #include "selfdrive/ui/ui.h"
+ 
+ #include <algorithm>
+@@ -201,7 +202,7 @@
+     brightness = brightness_override;
+   }
+ 
+-  if (!awake) {
++  if (!awake || niroDisplayDark) {
+     brightness = 0;
+   }
+ 

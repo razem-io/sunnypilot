@@ -1,0 +1,6 @@
+release/niro-ui -text
+release/qcom-encoder -text
+release/libyuv.so.0 -text
+native/assets/*.mesh -text
+patches/*.patch -whitespace
+native/road_scene.h -whitespace

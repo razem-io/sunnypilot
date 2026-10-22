@@ -1,0 +1,9 @@
+2021 Kia Niro FE Eco Hybrid by Xeeter (@Xeetert)
+https://sketchfab.com/3d-models/2021-kia-niro-fe-eco-hybrid-36999e25cf854948be95459eda809a10
+https://sketchfab.com/Xeetert
+Licensed under Creative Commons Attribution 4.0 (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+
+Original GLB supplied by the user. Converted to interleaved niro.mesh and original texture PNGs by convert_model.py. The unchanged GLB is retained in the HTML prototype assets directory.
+Native dashboard modifications: grey paint, scale, orientation and simplified lighting.
+No endorsement by the original creator is implied.
