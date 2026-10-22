@@ -1,6 +1,7 @@
 #!/bin/bash
 # Own only this gadget. Never replace another USB function or restart the UI.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 lab=/data/openpilot/custom/niro_device/projection
 mode=/sys/devices/platform/soc/a600000.ssusb/mode
 g=/sys/kernel/config/usb_gadget/aa_projection

@@ -34,6 +34,8 @@ when the lower USB port is configured by the headunit and stops it on disconnect
 The upper port still requires adequate power. Display sleep remains a manual
 moon-button action, independent of projection. TLS keys and mutable diagnostics
 live in `/data/local/niro-projection`, outside Git. No user credentials are shipped.
+The root USB service disables Python bytecode writes so it cannot create root-owned
+cache files that block the normal updater’s `git clean` operation.
 
 ## Build on ARM Linux / Apple Silicon Docker
 

@@ -5,6 +5,8 @@ RequiresMountsFor=/data /sys/kernel/config
 StartLimitIntervalSec=0
 
 [Service]
+# The root USB service must not create root-owned bytecode in the Git checkout.
+Environment=PYTHONDONTWRITEBYTECODE=1
 Type=simple
 WorkingDirectory=/data/openpilot/custom/niro_device/projection
 ExecStart=/bin/bash /data/openpilot/custom/niro_device/projection/device/usb-autoconnect.sh
